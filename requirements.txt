@@ -1,0 +1,10 @@
+streamlit==1.32.0
+torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pymupdf
+opencv-python-headless
+pandas<3.0
+pypdf
+Pillow==9.5.0
+easyocr
+google-genai
+pydantic
