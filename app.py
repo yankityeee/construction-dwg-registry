@@ -1,6 +1,7 @@
 import os
 import gc
 import json
+import time
 import tempfile
 import zipfile
 import streamlit as st
@@ -13,7 +14,7 @@ import cv2
 import numpy as np
 import pandas as pd
 from pypdf import PdfReader, PdfWriter
-from PIL import Image
+from PIL import Image, ImageDraw
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -50,7 +51,6 @@ class DrawingMetadata(BaseModel):
 # ==========================================
 @st.cache_resource
 def get_llm_client():
-    # Securely fetch the API key from Streamlit Secrets
     try:
         api_key = st.secrets["GOOGLE_API_KEY"]
         return genai.Client(api_key=api_key)
@@ -72,7 +72,7 @@ def load_pytorch_model():
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     else:
-        st.error(f"🚨 Model file '{model_path}' not found in the repository! Did you push it to GitHub?")
+        st.error(f"🚨 Model file '{model_path}' not found in the repository!")
         
     model = model.to(device)
     model.eval()
@@ -103,7 +103,6 @@ def classify_image_batch(batch_tensors: list, model: nn.Module, device: torch.de
     return pred_classes, conf_percents
 
 def extract_metadata_from_text(raw_text, client):
-    """Uses Gemini to extract details from native PDF text."""
     if not raw_text or not raw_text.strip() or not client:
         return "", ""
     prompt = f"""
@@ -135,12 +134,16 @@ def extract_metadata_from_text(raw_text, client):
         return "", ""
 
 def extract_metadata_from_image(fitz_page, client):
-    """Fallback: Renders the page to an image and uses Gemini Vision to extract details."""
     if not client: return "", ""
     
-    # Render the PDF page to a manageable image size to save memory
     pix = fitz_page.get_pixmap(dpi=150) 
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    
+    # Draw a white rectangle over the main drawing area to reduce visual noise
+    width, height = img.size
+    draw = ImageDraw.Draw(img)
+    mask_box = [0, 0, width * 0.80, height * 0.85]
+    draw.rectangle(mask_box, fill="white")
     
     prompt = """
     You are an expert engineering document assistant. Look at this engineering drawing.
@@ -170,11 +173,9 @@ def extract_metadata_from_image(fitz_page, client):
         return "", ""
 
 def extract_drawing_details(fitz_page, client):
-    """Determines whether to use native text or image fallback."""
     page_rect = fitz_page.rect
     w, h = page_rect.width, page_rect.height
     
-    # Try native text first (fastest and zero RAM cost)
     text_right = fitz_page.get_text("text", clip=fitz.Rect(w * 0.8, 0, w, h))
     text_bottom = fitz_page.get_text("text", clip=fitz.Rect(0, h * 0.85, w * 0.8, h))
     native_text = (text_right + " " + text_bottom).strip()
@@ -184,7 +185,6 @@ def extract_drawing_details(fitz_page, client):
         limited_text = " | ".join(words[-100:])
         return extract_metadata_from_text(limited_text, client)
     else:
-        # Fallback to multimodal image extraction
         return extract_metadata_from_image(fitz_page, client)
 
 def process_single_pdf(pdf_path: str, file_display_name: str, output_dir: str, model: nn.Module, device: torch.device, client, save_dwg, save_non_dwg) -> list:
@@ -261,7 +261,7 @@ def process_single_pdf(pdf_path: str, file_display_name: str, output_dir: str, m
 # ==========================================
 # STREAMLIT USER INTERFACE
 # ==========================================
-st.set_page_config(page_title="PDF Drawing Classifier", layout="wide")
+st.set_page_config(page_title="Drawing Registry App", layout="wide")
 st.title("🏗️ Construction Drawing Registry App")
 st.write("Upload your combined PDFs. The model will classify pages as drawings or non-drawings, rotate them correctly, and generate drawing list.")
 
@@ -269,65 +269,94 @@ st.write("Upload your combined PDFs. The model will classify pages as drawings o
 model, device = load_pytorch_model()
 llm_client = get_llm_client()
 
-# Toggles (All True by Default)
-st.sidebar.header("Output Preferences")
-SAVE_DRAWINGS_FOLDER = st.sidebar.checkbox("Save 'Drawings' Folder", value=True)
-SAVE_NON_DRAWINGS_FOLDER = st.sidebar.checkbox("Save 'Non-Drawings' Folder", value=True)
-GENERATE_CSV_REPORT = st.sidebar.checkbox("Generate CSV Report", value=True)
+# --- UI Session State Management ---
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = "default_uploader"
 
-uploaded_files = st.file_uploader("Upload PDF Files", type=["pdf"], accept_multiple_files=True)
+# The file uploader is tied to the dynamic session state key
+uploaded_files = st.file_uploader(
+    "Upload PDF Files", 
+    type=["pdf"], 
+    accept_multiple_files=True, 
+    key=st.session_state.uploader_key
+)
 
-if st.button("Start Processing", type="primary") and uploaded_files:
+if uploaded_files:
+    # Dropdown menu appears only after upload
+    output_options = st.multiselect(
+        "Select required output documents:",
+        options=["Save 'Drawings' Folder", "Save 'Non-Drawings' Folder", "Generate CSV Report"],
+        default=["Save 'Drawings' Folder", "Save 'Non-Drawings' Folder", "Generate CSV Report"]
+    )
     
-    with tempfile.TemporaryDirectory() as temp_in_dir, tempfile.TemporaryDirectory() as temp_out_dir:
+    # Map the dropdown choices to boolean toggles
+    SAVE_DRAWINGS_FOLDER = "Save 'Drawings' Folder" in output_options
+    SAVE_NON_DRAWINGS_FOLDER = "Save 'Non-Drawings' Folder" in output_options
+    GENERATE_CSV_REPORT = "Generate CSV Report" in output_options
+
+    # Layout for side-by-side buttons
+    col1, col2, col3 = st.columns([2, 2, 6])
+    
+    with col1:
+        start_button = st.button("Start Processing", type="primary")
         
-        all_results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for f in uploaded_files:
-            with open(os.path.join(temp_in_dir, f.name), "wb") as f_out:
-                f_out.write(f.getbuffer())
-                
-        total_files = len(uploaded_files)
-        
-        for i, filename in enumerate(os.listdir(temp_in_dir)):
-            status_text.text(f"Processing {filename} ({i+1}/{total_files})...")
-            pdf_path = os.path.join(temp_in_dir, filename)
+    with col2:
+        if st.button("Clear / New Batch", type="secondary"):
+            # Change the key to force the uploader to reset, emptying the files
+            st.session_state.uploader_key = str(time.time())
+            st.rerun()
+
+    # --- Processing Execution ---
+    if start_button:
+        with tempfile.TemporaryDirectory() as temp_in_dir, tempfile.TemporaryDirectory() as temp_out_dir:
             
-            file_results = process_single_pdf(
-                pdf_path, filename, temp_out_dir, model, device, llm_client, 
-                SAVE_DRAWINGS_FOLDER, SAVE_NON_DRAWINGS_FOLDER
-            )
-            all_results.extend(file_results)
-            progress_bar.progress((i + 1) / total_files)
+            all_results = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for f in uploaded_files:
+                with open(os.path.join(temp_in_dir, f.name), "wb") as f_out:
+                    f_out.write(f.getbuffer())
+                    
+            total_files = len(uploaded_files)
+            
+            for i, filename in enumerate(os.listdir(temp_in_dir)):
+                status_text.text(f"Processing {filename} ({i+1}/{total_files})...")
+                pdf_path = os.path.join(temp_in_dir, filename)
+                
+                file_results = process_single_pdf(
+                    pdf_path, filename, temp_out_dir, model, device, llm_client, 
+                    SAVE_DRAWINGS_FOLDER, SAVE_NON_DRAWINGS_FOLDER
+                )
+                all_results.extend(file_results)
+                progress_bar.progress((i + 1) / total_files)
 
-        status_text.text("Finalizing output...")
+            status_text.text("Finalizing output...")
 
-        if GENERATE_CSV_REPORT and all_results:
-            df = pd.DataFrame(all_results)
-            # Make sure we use the requested column order
-            columns_order = ["Folder", "Filename", "Page", "Drawing No.", "Drawing Title", "Prediction", "Confidence %"]
-            df = df[columns_order]
-            df = df.sort_values(by=['Folder', 'Filename', 'Page']).reset_index(drop=True)
-            csv_path = os.path.join(temp_out_dir, 'drawing_registry.csv')
-            df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+            if GENERATE_CSV_REPORT and all_results:
+                df = pd.DataFrame(all_results)
+                columns_order = ["Folder", "Filename", "Page", "Drawing No.", "Drawing Title", "Prediction", "Confidence %"]
+                df = df[columns_order]
+                df = df.sort_values(by=['Folder', 'Filename', 'Page']).reset_index(drop=True)
+                csv_path = os.path.join(temp_out_dir, 'drawing_registry.csv')
+                df.to_csv(csv_path, index=False, encoding='utf-8-sig')
 
-        zip_path = os.path.join(tempfile.gettempdir(), "processed_registry.zip")
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, _, files in os.walk(temp_out_dir):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, temp_out_dir)
-                    zipf.write(file_path, arcname)
+            zip_path = os.path.join(tempfile.gettempdir(), "processed_registry.zip")
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, _, files in os.walk(temp_out_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, temp_out_dir)
+                        zipf.write(file_path, arcname)
 
-        status_text.text("✅ Processing Complete!")
-        
-        with open(zip_path, "rb") as f:
-            st.download_button(
-                label="📥 Download Registry (ZIP)",
-                data=f,
-                file_name="processed_registry.zip",
-                mime="application/zip",
-                type="primary"
-            )
+            status_text.text("✅ Processing Complete!")
+            
+            # Persist download button directly below the progress indicators
+            with open(zip_path, "rb") as f:
+                st.download_button(
+                    label="📥 Download Registry (ZIP)",
+                    data=f,
+                    file_name="processed_registry.zip",
+                    mime="application/zip",
+                    type="primary"
+                )
