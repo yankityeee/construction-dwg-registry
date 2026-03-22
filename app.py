@@ -282,9 +282,11 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    # --- Modern Toggle UI ---
+    # --- Modern Toggle UI (Tighter Spacing) ---
     st.markdown("**⚙️ Output Preferences**")
-    opt_col1, opt_col2, opt_col3 = st.columns(3)
+    
+    # The 4th number (5) creates a massive empty column on the right, pushing the others left
+    opt_col1, opt_col2, opt_col3, empty_spacer1 = st.columns([1.5, 2.2, 1.5, 5])
     
     with opt_col1:
         SAVE_DRAWINGS_FOLDER = st.toggle("Drawings Folder", value=True)
@@ -295,14 +297,14 @@ if uploaded_files:
         
     st.divider() # Adds a clean horizontal line before the action buttons
     
-    # Layout for side-by-side buttons
-    col1, col2, col3 = st.columns([2, 2, 6])
+    # We do the exact same trick for the buttons
+    btn_col1, btn_col2, empty_spacer2 = st.columns([1.3, 1.5, 7])
     
-    with col1:
-        start_button = st.button("Start Processing", type="primary")
+    with btn_col1:
+        start_button = st.button("Start Processing", type="primary", use_container_width=True)
         
-    with col2:
-        if st.button("Clear / New Batch", type="secondary"):
+    with btn_col2:
+        if st.button("Clear / New Batch", type="secondary", use_container_width=True):
             # Change the key to force the uploader to reset, emptying the files
             st.session_state.uploader_key = str(time.time())
             st.rerun()
