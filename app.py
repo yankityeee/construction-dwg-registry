@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 Image.MAX_IMAGE_PIXELS = None
 
 # --- Configuration & Mappings ---
-BATCH_SIZE = 8
+BATCH_SIZE = 4 
 CLASS_NAMES = ['drawings_0', 'drawings_180', 'drawings_270', 'drawings_90', 'non_drawings']
 
 FOLDER_MAPPING = {
@@ -282,17 +282,23 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    # --- Modern Toggle UI (Vertical Alignment) ---
-    st.markdown("**⚙️ Output Preferences**")
+    st.markdown("### ⚙️ Output Preferences")
     
-    # Just list them directly, Streamlit will stack them vertically
+    # Folder Saving Toggles
     SAVE_DRAWINGS_FOLDER = st.toggle("Save 'Drawings' Folder", value=True)
     SAVE_NON_DRAWINGS_FOLDER = st.toggle("Save 'Non-Drawings' Folder", value=True)
-    GENERATE_CSV_REPORT = st.toggle("Generate CSV Report", value=True)
-        
-    st.divider() # Adds a clean horizontal line before the action buttons
     
-    # Layout for side-by-side action buttons
+    # Main CSV Toggle
+    GENERATE_CSV_REPORT = st.toggle("Generate CSV Report", value=True)
+    
+    # Conditional sub-toggle that only appears if the main CSV toggle is ON
+    INCLUDE_MODEL_OUTPUT = False
+    if GENERATE_CSV_REPORT:
+        INCLUDE_MODEL_OUTPUT = st.toggle("↳ Include Model Predictions & Confidence in CSV", value=False)
+
+    st.divider()
+
+    # Layout for side-by-side buttons
     btn_col1, btn_col2, empty_spacer = st.columns([1.3, 1.5, 7])
     
     with btn_col1:
@@ -331,9 +337,16 @@ if uploaded_files:
 
             status_text.text("Finalizing output...")
 
+            # Dynamic DataFrame Generation
             if GENERATE_CSV_REPORT and all_results:
                 df = pd.DataFrame(all_results)
-                columns_order = ["Folder", "Filename", "Page", "Drawing No.", "Drawing Title", "Prediction", "Confidence %"]
+                
+                # Assign columns based on the toggles
+                if INCLUDE_MODEL_OUTPUT:
+                    columns_order = ["Folder", "Filename", "Page", "Drawing No.", "Drawing Title", "Prediction", "Confidence %"]
+                else:
+                    columns_order = ["Folder", "Filename", "Page", "Drawing No.", "Drawing Title"]
+                    
                 df = df[columns_order]
                 df = df.sort_values(by=['Folder', 'Filename', 'Page']).reset_index(drop=True)
                 csv_path = os.path.join(temp_out_dir, 'drawing_registry.csv')
