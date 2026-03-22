@@ -282,18 +282,19 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    # Dropdown menu appears only after upload
-    output_options = st.multiselect(
-        "Select required output documents:",
-        options=["Save 'Drawings' Folder", "Save 'Non-Drawings' Folder", "Generate CSV Report"],
-        default=["Save 'Drawings' Folder", "Save 'Non-Drawings' Folder", "Generate CSV Report"]
-    )
+    # --- Modern Toggle UI ---
+    st.markdown("**⚙️ Output Preferences**")
+    opt_col1, opt_col2, opt_col3 = st.columns(3)
     
-    # Map the dropdown choices to boolean toggles
-    SAVE_DRAWINGS_FOLDER = "Save 'Drawings' Folder" in output_options
-    SAVE_NON_DRAWINGS_FOLDER = "Save 'Non-Drawings' Folder" in output_options
-    GENERATE_CSV_REPORT = "Generate CSV Report" in output_options
-
+    with opt_col1:
+        SAVE_DRAWINGS_FOLDER = st.toggle("Drawings Folder", value=True)
+    with opt_col2:
+        SAVE_NON_DRAWINGS_FOLDER = st.toggle("Non-Drawings Folder", value=True)
+    with opt_col3:
+        GENERATE_CSV_REPORT = st.toggle("CSV Report", value=True)
+        
+    st.divider() # Adds a clean horizontal line before the action buttons
+    
     # Layout for side-by-side buttons
     col1, col2, col3 = st.columns([2, 2, 6])
     
