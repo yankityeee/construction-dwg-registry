@@ -294,7 +294,7 @@ if uploaded_files:
     # Conditional sub-toggle that only appears if the main CSV toggle is ON
     INCLUDE_MODEL_OUTPUT = False
     if GENERATE_CSV_REPORT:
-        INCLUDE_MODEL_OUTPUT = st.toggle("↳ Include Model Predictions & Confidence in CSV", value=False)
+        INCLUDE_MODEL_OUTPUT = st.toggle("Include Model Predictions & Confidence in CSV", value=False)
 
     st.divider()
 
