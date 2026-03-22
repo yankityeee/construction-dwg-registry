@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 Image.MAX_IMAGE_PIXELS = None
 
 # --- Configuration & Mappings ---
-BATCH_SIZE = 4 
+BATCH_SIZE = 8
 CLASS_NAMES = ['drawings_0', 'drawings_180', 'drawings_270', 'drawings_90', 'non_drawings']
 
 FOLDER_MAPPING = {
@@ -282,23 +282,18 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    # --- Modern Toggle UI (Tighter Spacing) ---
+    # --- Modern Toggle UI (Vertical Alignment) ---
     st.markdown("**⚙️ Output Preferences**")
     
-    # The 4th number (5) creates a massive empty column on the right, pushing the others left
-    opt_col1, opt_col2, opt_col3, empty_spacer1 = st.columns([1.5, 2.2, 1.5, 5])
-    
-    with opt_col1:
-        SAVE_DRAWINGS_FOLDER = st.toggle("Drawings Folder", value=True)
-    with opt_col2:
-        SAVE_NON_DRAWINGS_FOLDER = st.toggle("Non-Drawings Folder", value=True)
-    with opt_col3:
-        GENERATE_CSV_REPORT = st.toggle("CSV Report", value=True)
+    # Just list them directly, Streamlit will stack them vertically
+    SAVE_DRAWINGS_FOLDER = st.toggle("Save 'Drawings' Folder", value=True)
+    SAVE_NON_DRAWINGS_FOLDER = st.toggle("Save 'Non-Drawings' Folder", value=True)
+    GENERATE_CSV_REPORT = st.toggle("Generate CSV Report", value=True)
         
     st.divider() # Adds a clean horizontal line before the action buttons
     
-    # We do the exact same trick for the buttons
-    btn_col1, btn_col2, empty_spacer2 = st.columns([1.3, 1.5, 7])
+    # Layout for side-by-side action buttons
+    btn_col1, btn_col2, empty_spacer = st.columns([1.3, 1.5, 7])
     
     with btn_col1:
         start_button = st.button("Start Processing", type="primary", use_container_width=True)
