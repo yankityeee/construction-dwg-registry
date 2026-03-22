@@ -3,9 +3,8 @@ torch
 torchvision
 pymupdf
 opencv-python-headless
-pandas<3.0
+pandas
 pypdf
-Pillow==9.5.0
-easyocr
+Pillow
 google-genai
 pydantic

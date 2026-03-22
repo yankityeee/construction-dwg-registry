@@ -13,8 +13,7 @@ import cv2
 import numpy as np
 import pandas as pd
 from pypdf import PdfReader, PdfWriter
-from PIL import Image, ImageDraw
-import easyocr
+from PIL import Image
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -60,12 +59,7 @@ def get_llm_client():
         return None
 
 @st.cache_resource
-def load_easyocr():
-    return easyocr.Reader(['en'], gpu=False)
-
-@st.cache_resource
 def load_pytorch_model():
-    # Assumes drawing_classifier.pth is pushed to your GitHub repo alongside app.py
     model_path = "drawing_classifier.pth" 
     device = torch.device("cpu")
     
@@ -108,11 +102,12 @@ def classify_image_batch(batch_tensors: list, model: nn.Module, device: torch.de
     conf_percents = [conf.item() * 100 for conf in confidences]
     return pred_classes, conf_percents
 
-def extract_metadata_with_llm(raw_text, client):
+def extract_metadata_from_text(raw_text, client):
+    """Uses Gemini to extract details from native PDF text."""
     if not raw_text or not raw_text.strip() or not client:
         return "", ""
     prompt = f"""
-    You are an expert engineering document assistant. Extract the exact Drawing Title and Drawing Number from the raw OCR/PDF text below.
+    You are an expert engineering document assistant. Extract the exact Drawing Title and Drawing Number from the raw text below.
     If a value cannot be confidently found, output an empty string "".
     Do not include revision numbers in the Drawing Number unless attached directly to it.
 
@@ -139,31 +134,47 @@ def extract_metadata_with_llm(raw_text, client):
     except Exception:
         return "", ""
 
-def process_page_fallback_ocr(page, reader):
-    pix = page.get_pixmap(dpi=200)
+def extract_metadata_from_image(fitz_page, client):
+    """Fallback: Renders the page to an image and uses Gemini Vision to extract details."""
+    if not client: return "", ""
+    
+    # Render the PDF page to a manageable image size to save memory
+    pix = fitz_page.get_pixmap(dpi=150) 
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    width, height = img.size
-    draw = ImageDraw.Draw(img)
-    draw.rectangle([0, 0, width * 0.80, height * 0.85], fill="white")
     
-    img_np = np.array(img)
-    results = reader.readtext(img_np, paragraph=False)
-    extracted_items = []
-    
-    for bbox, text, prob in results:
-        text = text.strip()
-        if not text or prob < 0.2: continue
-        y_max = max([int(pt[1]) for pt in bbox])
-        extracted_items.append({"word": text, "y_bottom": y_max})
+    prompt = """
+    You are an expert engineering document assistant. Look at this engineering drawing.
+    Extract the exact Drawing Title and Drawing Number from the title block.
+    If a value cannot be confidently found, output an empty string "".
+    Do not include revision numbers in the Drawing Number unless attached directly to it.
+    """
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[prompt, img],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=DrawingMetadata,
+                temperature=0.1
+            )
+        )
+        data = json.loads(response.text)
+        title = data.get("drawing_title", "").strip()
+        number = data.get("drawing_number", "").strip()
         
-    extracted_items.sort(key=lambda x: x["y_bottom"], reverse=True)
-    bottom_words = [item["word"] for item in extracted_items[:100]]
-    return " | ".join(bottom_words)
+        if title.lower() in ["not found", "none", "n/a", "null"]: title = ""
+        if number.lower() in ["not found", "none", "n/a", "null"]: number = ""
+        return title, number
+    except Exception as e:
+        print(f"Vision extraction failed: {e}")
+        return "", ""
 
-def extract_drawing_details(fitz_page, page_num, reader, client):
+def extract_drawing_details(fitz_page, client):
+    """Determines whether to use native text or image fallback."""
     page_rect = fitz_page.rect
     w, h = page_rect.width, page_rect.height
     
+    # Try native text first (fastest and zero RAM cost)
     text_right = fitz_page.get_text("text", clip=fitz.Rect(w * 0.8, 0, w, h))
     text_bottom = fitz_page.get_text("text", clip=fitz.Rect(0, h * 0.85, w * 0.8, h))
     native_text = (text_right + " " + text_bottom).strip()
@@ -171,12 +182,12 @@ def extract_drawing_details(fitz_page, page_num, reader, client):
     if len(native_text) > 20:
         words = native_text.split()
         limited_text = " | ".join(words[-100:])
-        return extract_metadata_with_llm(limited_text, client)
+        return extract_metadata_from_text(limited_text, client)
     else:
-        ocr_text = process_page_fallback_ocr(fitz_page, reader)
-        return extract_metadata_with_llm(ocr_text, client)
+        # Fallback to multimodal image extraction
+        return extract_metadata_from_image(fitz_page, client)
 
-def process_single_pdf(pdf_path: str, file_display_name: str, output_dir: str, model: nn.Module, device: torch.device, reader, client, save_dwg, save_non_dwg) -> list:
+def process_single_pdf(pdf_path: str, file_display_name: str, output_dir: str, model: nn.Module, device: torch.device, client, save_dwg, save_non_dwg) -> list:
     base_name = os.path.splitext(os.path.basename(pdf_path))[0]
     results = []
 
@@ -214,7 +225,7 @@ def process_single_pdf(pdf_path: str, file_display_name: str, output_dir: str, m
                         current_fitz_page.set_rotation((current_fitz_page.rotation + degrees_to_fix) % 360)
                     
                     if target_folder_name == 'drawings':
-                        drawing_title, drawing_no = extract_drawing_details(current_fitz_page, current_page_num, reader, client)
+                        drawing_title, drawing_no = extract_drawing_details(current_fitz_page, client)
 
                     if (target_folder_name == 'drawings' and save_dwg) or \
                        (target_folder_name == 'non_drawings' and save_non_dwg):
@@ -251,12 +262,11 @@ def process_single_pdf(pdf_path: str, file_display_name: str, output_dir: str, m
 # STREAMLIT USER INTERFACE
 # ==========================================
 st.set_page_config(page_title="PDF Drawing Classifier", layout="wide")
-st.title("🏗️ Construction Drawing Registry")
-st.write("Upload your combined PDFs. The model will classify pages as drawings or non-drawings, rotate them correctly, and generate a drawing list.")
+st.title("🏗️ Construction Drawing Registry App")
+st.write("Upload your combined PDFs. The model will classify pages as drawings or non-drawings, rotate them correctly, and generate drawing list.")
 
 # Load Heavy Resources
 model, device = load_pytorch_model()
-reader = load_easyocr()
 llm_client = get_llm_client()
 
 # Toggles (All True by Default)
@@ -269,27 +279,24 @@ uploaded_files = st.file_uploader("Upload PDF Files", type=["pdf"], accept_multi
 
 if st.button("Start Processing", type="primary") and uploaded_files:
     
-    # Create secure temporary directories for processing
     with tempfile.TemporaryDirectory() as temp_in_dir, tempfile.TemporaryDirectory() as temp_out_dir:
         
         all_results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # 1. Save uploaded files to temp input dir
         for f in uploaded_files:
             with open(os.path.join(temp_in_dir, f.name), "wb") as f_out:
                 f_out.write(f.getbuffer())
                 
         total_files = len(uploaded_files)
         
-        # 2. Process each file
         for i, filename in enumerate(os.listdir(temp_in_dir)):
             status_text.text(f"Processing {filename} ({i+1}/{total_files})...")
             pdf_path = os.path.join(temp_in_dir, filename)
             
             file_results = process_single_pdf(
-                pdf_path, filename, temp_out_dir, model, device, reader, llm_client, 
+                pdf_path, filename, temp_out_dir, model, device, llm_client, 
                 SAVE_DRAWINGS_FOLDER, SAVE_NON_DRAWINGS_FOLDER
             )
             all_results.extend(file_results)
@@ -297,15 +304,16 @@ if st.button("Start Processing", type="primary") and uploaded_files:
 
         status_text.text("Finalizing output...")
 
-        # 3. Generate CSV if requested
         if GENERATE_CSV_REPORT and all_results:
             df = pd.DataFrame(all_results)
+            # Make sure we use the requested column order
+            columns_order = ["Folder", "Filename", "Page", "Drawing No.", "Drawing Title", "Prediction", "Confidence %"]
+            df = df[columns_order]
             df = df.sort_values(by=['Folder', 'Filename', 'Page']).reset_index(drop=True)
-            csv_path = os.path.join(temp_out_dir, 'pdf_classification_results.csv')
+            csv_path = os.path.join(temp_out_dir, 'drawing_registry.csv')
             df.to_csv(csv_path, index=False, encoding='utf-8-sig')
 
-        # 4. Zip the output directory
-        zip_path = os.path.join(tempfile.gettempdir(), "processed_results.zip")
+        zip_path = os.path.join(tempfile.gettempdir(), "processed_registry.zip")
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, _, files in os.walk(temp_out_dir):
                 for file in files:
@@ -315,7 +323,6 @@ if st.button("Start Processing", type="primary") and uploaded_files:
 
         status_text.text("✅ Processing Complete!")
         
-        # 5. Provide Download Button for the ZIP file
         with open(zip_path, "rb") as f:
             st.download_button(
                 label="📥 Download Registry (ZIP)",
