@@ -85,7 +85,6 @@ def load_resnet_model(model_path="drawing_classifier.pth"):
 
 @st.cache_resource
 def load_ocr():
-    # Load EasyOCR into CPU memory to ensure we don't look for GPUs that don't exist
     return easyocr.Reader(['en'], gpu=False, verbose=False)
 
 @st.cache_resource
@@ -107,7 +106,7 @@ def extract_drawing_info(pdf_src: str, ocr: easyocr.Reader, client: genai.Client
     
     # Define crop rectangles based on drawing orientation
     crop_rects = []
-    is_large = (w * h) > (500 * 700) # Arbitrary threshold for large drawings
+    is_large = (w * h) > (7016 * 9933) # larger than A1 paper size
     
     if h > w: # Portrait
         y_start = h * 0.8
@@ -234,7 +233,7 @@ with st.spinner("Loading AI Models... (This takes a moment on startup)"):
     ocr = load_ocr()
     client = load_gemini_client()
 
-uploaded_files = st.file_uploader("Upload PDF Files", type="pdf", accept_multiple_files=True)
+uploaded_files = st.file_uploader("", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
     st.markdown("#### ⚙️ Output Preferences")
