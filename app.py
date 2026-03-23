@@ -390,31 +390,31 @@ if uploaded_files:
                 image_placeholder.empty() 
                 status_text.text("Finalizing files...")
 
-            if GENERATE_CSV_REPORT and all_results:
-                df = pd.DataFrame(all_results)
-                
-                cols = ['Folder', 'Filename', 'Page', 'Drawing Title', 'Drawing Number']
-                if INCLUDE_MODEL_OUTPUT:
-                    cols.extend(['Prediction', 'Confidence (%)'])
+                if GENERATE_CSV_REPORT and all_results:
+                    df = pd.DataFrame(all_results)
                     
-                df = df[cols].sort_values(by=['Folder', 'Filename']).reset_index(drop=True)
+                    cols = ['Folder', 'Filename', 'Page', 'Drawing Title', 'Drawing Number']
+                    if INCLUDE_MODEL_OUTPUT:
+                        cols.extend(['Prediction', 'Confidence (%)'])
+                        
+                    df = df[cols].sort_values(by=['Folder', 'Filename']).reset_index(drop=True)
+                    
+                    csv_path = os.path.join(output_dir, 'drawing_registry.csv')
+                    df.to_csv(csv_path, index=False)
+                    st.dataframe(df)
                 
-                csv_path = os.path.join(output_dir, 'drawing_registry.csv')
-                df.to_csv(csv_path, index=False)
-                st.dataframe(df)
-            
-            if not (SAVE_DRAWINGS_FOLDER or SAVE_NON_DRAWINGS_FOLDER or GENERATE_CSV_REPORT):
-                st.warning("⚠️ No output preferences were selected, so no files were saved or generated.")
-            else:
-                st.success("✅ Processing Complete!")
-                zip_path = create_zip_file(output_dir, "processed_drawings.zip")
-                
-                with open(zip_path, "rb") as fp:
-                    # Make the download button primary color as well
-                    st.download_button(
-                        label="📥 Download Zipped Registry",
-                        data=fp,
-                        file_name="processed_drawings.zip",
-                        mime="application/zip",
-                        type="primary" 
-                    )
+                if not (SAVE_DRAWINGS_FOLDER or SAVE_NON_DRAWINGS_FOLDER or GENERATE_CSV_REPORT):
+                    st.warning("⚠️ No output preferences were selected, so no files were saved or generated.")
+                else:
+                    st.success("✅ Processing Complete!")
+                    zip_path = create_zip_file(output_dir, "processed_drawings.zip")
+                    
+                    with open(zip_path, "rb") as fp:
+                        # Make the download button primary color as well
+                        st.download_button(
+                            label="📥 Download Zipped Registry",
+                            data=fp,
+                            file_name="processed_drawings.zip",
+                            mime="application/zip",
+                            type="primary" 
+                        )
