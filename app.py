@@ -5,19 +5,17 @@ import json
 import tempfile
 import shutil
 import zipfile
-from PIL import Image
-from paddleocr import PaddleOCR
-from pdf2image import convert_from_path
-from google import genai
-from google.genai import types
+import easyocr  # Swapped from paddleocr
+import fitz      # PyMuPDF
+import cv2
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms, models
-import fitz  # PyMuPDF
-import cv2
-import numpy as np
-import pandas as pd
+from google import genai
+from google.genai import types
 
 # ==========================================
 # CONFIGURATION & MAPPINGS
@@ -87,7 +85,8 @@ def load_resnet_model(model_path="drawing_classifier.pth"):
 
 @st.cache_resource
 def load_ocr():
-    return PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
+    # Load EasyOCR into CPU memory to ensure we don't look for GPUs that don't exist
+    return easyocr.Reader(['en'], gpu=False, verbose=False)
 
 @st.cache_resource
 def load_gemini_client():
@@ -96,50 +95,75 @@ def load_gemini_client():
 # ==========================================
 # PROCESSING FUNCTIONS
 # ==========================================
-def extract_drawing_info(pdf_src: str, ocr: PaddleOCR, client: genai.Client) -> dict:
-    def get_crops(image):
-        width, height = image.size
-        crops = []
-        A1_AREA = 7016 * 9933
-        is_large = (width * height) > A1_AREA
-
-        if height > width:
-            crop_boundary = int(height * 0.8)
-            if is_large:
-                mid_w = width // 2
-                crops.extend([image.crop((0, crop_boundary, mid_w, height)), 
-                              image.crop((mid_w, crop_boundary, width, height))])
-            else:
-                crops.append(image.crop((0, crop_boundary, width, height)))
+def extract_drawing_info(pdf_src: str, ocr: easyocr.Reader, client: genai.Client) -> dict:
+    """
+    Extracts text using PyMuPDF to crop mathematical areas BEFORE rendering them to images.
+    This saves massive amounts of RAM compared to rendering the whole PDF first.
+    """
+    doc = fitz.open(pdf_src)
+    page = doc[0]
+    rect = page.rect
+    w, h = rect.width, rect.height
+    
+    # Define crop rectangles based on drawing orientation
+    crop_rects = []
+    is_large = (w * h) > (500 * 700) # Arbitrary threshold for large drawings
+    
+    if h > w: # Portrait
+        y_start = h * 0.8
+        if is_large:
+            mid_w = w / 2
+            crop_rects.extend([
+                fitz.Rect(0, y_start, mid_w, h),
+                fitz.Rect(mid_w, y_start, w, h)
+            ])
         else:
-            bottom_crop_boundary = int(height * 0.8)
-            right_crop_boundary = int(width * 0.8)
-            if is_large:
-                mid_w, mid_h = width // 2, height // 2
-                crops.extend([image.crop((0, bottom_crop_boundary, mid_w, height)),
-                              image.crop((mid_w, bottom_crop_boundary, width, height)),
-                              image.crop((right_crop_boundary, 0, width, mid_h)),
-                              image.crop((right_crop_boundary, mid_h, width, height))])
-            else:
-                crops.extend([image.crop((0, bottom_crop_boundary, width, height)),
-                              image.crop((right_crop_boundary, 0, width, height))])
-        return crops
-
-    images = convert_from_path(pdf_src, dpi=300)
-    if not images: return {"drawing_title": "", "drawing_number": ""}
-
-    image = images[0]
-    crops = get_crops(image)
+            crop_rects.append(fitz.Rect(0, y_start, w, h))
+    else: # Landscape
+        y_start = h * 0.8
+        x_start = w * 0.8
+        if is_large:
+            mid_w, mid_h = w / 2, h / 2
+            crop_rects.extend([
+                fitz.Rect(0, y_start, mid_w, h),
+                fitz.Rect(mid_w, y_start, w, h),
+                fitz.Rect(x_start, 0, w, mid_h),
+                fitz.Rect(x_start, mid_h, w, h)
+            ])
+        else:
+            crop_rects.extend([
+                fitz.Rect(0, y_start, w, h),
+                fitz.Rect(x_start, 0, w, h)
+            ])
+            
     raw_text = ""
+    zoom = 2.0 # Renders at roughly 144 DPI - balance between OCR quality and RAM
+    mat = fitz.Matrix(zoom, zoom)
+    
+    for clip_rect in crop_rects:
+        # Render ONLY the specific cropped area to an image
+        pix = page.get_pixmap(matrix=mat, clip=clip_rect)
+        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        
+        # Convert RGBA to RGB if necessary for EasyOCR
+        if pix.n == 4:
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+            
+        # EasyOCR returns a list of tuples: (bounding_box, text, confidence)
+        results = ocr.readtext(img_array)
+        text_lines = [res[1] for res in results]
+        
+        if text_lines:
+            raw_text += " " + " ".join(text_lines)
+            
+        # Aggressive garbage collection for RAM safety
+        del pix, img_array, results
+        gc.collect()
 
-    for crop_img in crops:
-        img_array = np.array(crop_img)
-        result = ocr.ocr(img_array, cls=True)
-        if result and result[0]:
-            raw_text += " " + " ".join([line[1][0] for line in result[0]])
+    doc.close()
 
-    del images, image, crops
-    gc.collect()
+    if not raw_text.strip():
+        return {"drawing_title": "", "drawing_number": ""}
 
     try:
         response = client.models.generate_content(
@@ -212,7 +236,6 @@ with st.spinner("Loading AI Models... (This takes a moment on startup)"):
 
 uploaded_files = st.file_uploader("Upload PDF Files", type="pdf", accept_multiple_files=True)
 
-# User Toggles Section
 if uploaded_files:
     st.markdown("#### ⚙️ Output Preferences")
     
@@ -268,7 +291,6 @@ if uploaded_files:
                                 
                                 out_pdf_path = None
                                 
-                                # Conditional Folder Saving
                                 if (target_folder_name == 'drawings' and SAVE_DRAWINGS_FOLDER) or \
                                    (target_folder_name == 'non_drawings' and SAVE_NON_DRAWINGS_FOLDER):
                                     out_pdf_path = process_and_save_page(fitz_doc, pred_class, output_dir, base_name, current_page_num, total_pages)
@@ -279,7 +301,6 @@ if uploaded_files:
                                     "Page": current_page_num
                                 }
 
-                                # Metadata Extraction (Only if it's a drawing AND it was saved)
                                 if out_pdf_path and target_folder_name == 'drawings':
                                     status_text.text(f"Extracting text from: {filename} (Page {current_page_num})")
                                     dwg_info = extract_drawing_info(out_pdf_path, ocr, client)
@@ -289,7 +310,6 @@ if uploaded_files:
                                     row_data["Drawing Title"] = ""
                                     row_data["Drawing Number"] = ""
 
-                                # Conditional Model Output
                                 if INCLUDE_MODEL_OUTPUT:
                                     row_data["Prediction"] = pred_class
                                     row_data["Confidence (%)"] = round(conf_percent, 2)
@@ -307,7 +327,6 @@ if uploaded_files:
 
             status_text.text("Finalizing files...")
 
-            # Conditional CSV Generation
             if GENERATE_CSV_REPORT and all_results:
                 df = pd.DataFrame(all_results)
                 
@@ -321,7 +340,6 @@ if uploaded_files:
                 df.to_csv(csv_path, index=False)
                 st.dataframe(df)
             
-            # Final Zip & Download
             if not (SAVE_DRAWINGS_FOLDER or SAVE_NON_DRAWINGS_FOLDER or GENERATE_CSV_REPORT):
                 st.warning("⚠️ No output preferences were selected, so no files were saved or generated.")
             else:

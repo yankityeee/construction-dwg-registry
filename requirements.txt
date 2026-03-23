@@ -1,17 +1,9 @@
-# Strict Version Match from your Notebook
-numpy==1.26.4
-paddlepaddle==2.6.2
-paddleocr==2.7.3
-langchain==0.3.26
-
-# Vision & Drawing
-opencv-python-headless
-pymupdf
-pdf2image
-
-# ML & Logic
+numpy
+pandas
 torch
 torchvision
-pandas
+pymupdf
+opencv-python-headless
+easyocr
 google-genai
 pydantic
