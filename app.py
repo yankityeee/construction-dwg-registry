@@ -315,7 +315,6 @@ if uploaded_files:
             total_files = len(pdf_files)
 
             for idx, filename in enumerate(pdf_files):
-                status_text.text(f"Processing: {filename}")
                 pdf_path = os.path.join(input_dir, filename)
                 base_name = os.path.splitext(filename)[0]
                 
