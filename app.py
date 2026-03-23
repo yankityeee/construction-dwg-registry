@@ -239,7 +239,6 @@ with st.spinner("Loading AI Models... (This takes a moment on startup)"):
 
 # 1. Original Uploader Layout
 uploaded_files = st.file_uploader(
-
     type="pdf", 
     accept_multiple_files=True, 
     key=str(st.session_state.uploader_key)
