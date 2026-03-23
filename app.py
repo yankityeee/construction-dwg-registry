@@ -261,15 +261,14 @@ if uploaded_files:
         
     files_to_process = list(unique_files.values())
 
-    st.markdown("#### ⚙️ Output Preferences")
-    
-    SAVE_DRAWINGS_FOLDER = st.toggle("Save 'Drawings' Folder", value=True)
-    SAVE_NON_DRAWINGS_FOLDER = st.toggle("Save 'Non-Drawings' Folder", value=True)
-    GENERATE_CSV_REPORT = st.toggle("Generate CSV Report", value=True)
-    
-    INCLUDE_MODEL_OUTPUT = False
-    if GENERATE_CSV_REPORT:
-        INCLUDE_MODEL_OUTPUT = st.toggle("Include Model Predictions & Confidence in CSV", value=False)
+    with st.expander("⚙️ Output Preferences"):    
+        SAVE_DRAWINGS_FOLDER = st.toggle("Save 'Drawings' Folder", value=True)
+        SAVE_NON_DRAWINGS_FOLDER = st.toggle("Save 'Non-Drawings' Folder", value=True)
+        GENERATE_CSV_REPORT = st.toggle("Generate CSV Report", value=True)
+        
+        INCLUDE_MODEL_OUTPUT = False
+        if GENERATE_CSV_REPORT:
+            INCLUDE_MODEL_OUTPUT = st.toggle("Include Model Predictions & Confidence in CSV", value=False)
 
     st.write("---") # Visual divider before actions
 
@@ -284,88 +283,112 @@ if uploaded_files:
             st.rerun()
 
     if start_processing:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            input_dir = os.path.join(temp_dir, "inputs")
-            output_dir = os.path.join(temp_dir, "outputs")
-            os.makedirs(input_dir, exist_ok=True)
-            os.makedirs(output_dir, exist_ok=True)
-            
-            all_results = []
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            # Save only the unique files
-            for file in files_to_process:
-                file_path = os.path.join(input_dir, file.name)
-                with open(file_path, "wb") as f:
-                    f.write(file.getbuffer())
-
-            pdf_files = os.listdir(input_dir)
-            total_files = len(pdf_files)
-
-            for idx, filename in enumerate(pdf_files):
-                # Default status for non-drawings or pre-processing
-                status_text.text(f"Processing: {filename}")
+            with tempfile.TemporaryDirectory() as temp_dir:
+                input_dir = os.path.join(temp_dir, "inputs")
+                output_dir = os.path.join(temp_dir, "outputs")
+                os.makedirs(input_dir, exist_ok=True)
+                os.makedirs(output_dir, exist_ok=True)
                 
-                pdf_path = os.path.join(input_dir, filename)
-                base_name = os.path.splitext(filename)[0]
+                all_results = []
                 
-                try:
-                    fitz_doc = fitz.open(pdf_path)
-                    total_pages = len(fitz_doc)
-                    batch_tensors, batch_page_nums = [], []
+                # --- UI PLACEHOLDERS ---
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                image_placeholder = st.empty() # Creates a dedicated box for our live preview
 
-                    for page_num in range(total_pages):
-                        fitz_page = fitz_doc[page_num]
-                        tensor = preprocess_pdf_page(fitz_page)
-                        batch_tensors.append(tensor)
-                        batch_page_nums.append(page_num + 1)
+                for file in files_to_process:
+                    file_path = os.path.join(input_dir, file.name)
+                    with open(file_path, "wb") as f:
+                        f.write(file.getbuffer())
 
-                        if len(batch_tensors) == BATCH_SIZE or page_num == total_pages - 1:
-                            pred_classes, conf_percents = classify_image_batch(batch_tensors, model, device)
+                pdf_files = os.listdir(input_dir)
+                total_files = len(pdf_files)
 
-                            for i, (pred_class, conf_percent) in enumerate(zip(pred_classes, conf_percents)):
-                                current_page_num = batch_page_nums[i]
-                                target_folder_name = FOLDER_MAPPING[pred_class]
-                                
-                                out_pdf_path = None
-                                
-                                if (target_folder_name == 'drawings' and SAVE_DRAWINGS_FOLDER) or \
-                                   (target_folder_name == 'non_drawings' and SAVE_NON_DRAWINGS_FOLDER):
-                                    out_pdf_path = process_and_save_page(fitz_doc, pred_class, output_dir, base_name, current_page_num, total_pages)
+                for idx, filename in enumerate(pdf_files):
+                    status_text.text(f"Processing: {filename}")
+                    pdf_path = os.path.join(input_dir, filename)
+                    base_name = os.path.splitext(filename)[0]
+                    
+                    try:
+                        fitz_doc = fitz.open(pdf_path)
+                        total_pages = len(fitz_doc)
+                        batch_tensors, batch_page_nums = [], []
 
-                                row_data = {
-                                    "Folder": target_folder_name,
-                                    "Filename": filename,
-                                    "Page": current_page_num
-                                }
+                        for page_num in range(total_pages):
+                            fitz_page = fitz_doc[page_num]
+                            
+                            # --- LIVE IMAGE PREVIEW ---
+                            # Generate a fast, low-res thumbnail to save RAM and time
+                            thumb_pix = fitz_page.get_pixmap(matrix=fitz.Matrix(0.3, 0.3))
+                            image_placeholder.image(
+                                thumb_pix.tobytes("png"), 
+                                caption=f"Live View: {filename} (Page {page_num + 1})", 
+                                width=350
+                            )
+                            # --------------------------
 
-                                if out_pdf_path and target_folder_name == 'drawings':
-                                    # 2. Specific status update for drawings undergoing text extraction
-                                    status_text.text(f"Processing: {filename} (Page {current_page_num}/{total_pages})")
-                                    dwg_info = extract_drawing_info(out_pdf_path, ocr, client)
-                                    row_data["Drawing Title"] = dwg_info.get("drawing_title", "")
-                                    row_data["Drawing Number"] = dwg_info.get("drawing_number", "")
-                                else:
-                                    row_data["Drawing Title"] = ""
-                                    row_data["Drawing Number"] = ""
+                            tensor = preprocess_pdf_page(fitz_page)
+                            batch_tensors.append(tensor)
+                            batch_page_nums.append(page_num + 1)
 
-                                if INCLUDE_MODEL_OUTPUT:
-                                    row_data["Prediction"] = pred_class
-                                    row_data["Confidence (%)"] = round(conf_percent, 2)
+                            if len(batch_tensors) == BATCH_SIZE or page_num == total_pages - 1:
+                                pred_classes, conf_percents = classify_image_batch(batch_tensors, model, device)
 
-                                all_results.append(row_data)
+                                for i, (pred_class, conf_percent) in enumerate(zip(pred_classes, conf_percents)):
+                                    current_page_num = batch_page_nums[i]
+                                    target_folder_name = FOLDER_MAPPING[pred_class]
+                                    
+                                    out_pdf_path = None
+                                    
+                                    if (target_folder_name == 'drawings' and SAVE_DRAWINGS_FOLDER) or \
+                                       (target_folder_name == 'non_drawings' and SAVE_NON_DRAWINGS_FOLDER):
+                                        out_pdf_path = process_and_save_page(fitz_doc, pred_class, output_dir, base_name, current_page_num, total_pages)
 
-                            batch_tensors, batch_page_nums = [], []
-                            gc.collect()
+                                    row_data = {
+                                        "Folder": target_folder_name,
+                                        "Filename": filename,
+                                        "Page": current_page_num
+                                    }
 
-                    fitz_doc.close()
-                except Exception as e:
-                    st.error(f"Error processing {filename}: {e}")
+                                    if out_pdf_path and target_folder_name == 'drawings':
+                                        status_text.text(f"Processing: {filename} (Page {current_page_num}/{total_pages})")
+                                        dwg_info = extract_drawing_info(out_pdf_path, ocr, client)
+                                        
+                                        title = dwg_info.get("drawing_title", "")
+                                        number = dwg_info.get("drawing_number", "")
+                                        
+                                        row_data["Drawing Title"] = title
+                                        row_data["Drawing Number"] = number
+                                        
+                                        # --- TOAST NOTIFICATION ---
+                                        # Pop a slick notification if we found a drawing number
+                                        if number:
+                                            st.toast(f"Extracted: {number}", icon="✅")
+                                        # --------------------------
+                                            
+                                    else:
+                                        row_data["Drawing Title"] = ""
+                                        row_data["Drawing Number"] = ""
 
-                progress_bar.progress((idx + 1) / total_files)
+                                    if INCLUDE_MODEL_OUTPUT:
+                                        row_data["Prediction"] = pred_class
+                                        row_data["Confidence (%)"] = round(conf_percent, 2)
 
-            status_text.text("Finalizing files...")
+                                    all_results.append(row_data)
+
+                                batch_tensors, batch_page_nums = [], []
+                                gc.collect()
+
+                        fitz_doc.close()
+                    except Exception as e:
+                        st.error(f"Error processing {filename}: {e}")
+
+                    progress_bar.progress((idx + 1) / total_files)
+
+                # --- CLEANUP ---
+                # Remove the preview image and status text once everything is done
+                image_placeholder.empty() 
+                status_text.text("Finalizing files...")
 
             if GENERATE_CSV_REPORT and all_results:
                 df = pd.DataFrame(all_results)
