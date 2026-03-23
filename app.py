@@ -239,7 +239,6 @@ with st.spinner("Loading AI Models... (This takes a moment on startup)"):
 
 # 1. Original Uploader Layout
 uploaded_files = st.file_uploader(
-    "Upload PDF Files", 
     type="pdf", 
     accept_multiple_files=True, 
     key=str(st.session_state.uploader_key)
@@ -290,13 +289,14 @@ if uploaded_files:
             os.makedirs(output_dir, exist_ok=True)
             
             all_results = []
-            live_log_data = [] # Data for the live extraction table
+            live_log_data = [] 
             
             # --- UI DASHBOARD PLACEHOLDERS ---
             progress_bar = st.progress(0)
             status_text = st.empty()
+            live_header = st.empty() # Added placeholder for the header
             
-            st.markdown("### Live Processing View")
+            live_header.markdown("### Live Processing View")
             dash_col1, dash_col2 = st.columns([1, 1])
             with dash_col1:
                 image_placeholder = st.empty() 
@@ -314,9 +314,7 @@ if uploaded_files:
             total_files = len(pdf_files)
 
             for idx, filename in enumerate(pdf_files):
-                # Default status for non-drawings or pre-processing
                 status_text.text(f"Processing: {filename}")
-                
                 pdf_path = os.path.join(input_dir, filename)
                 base_name = os.path.splitext(filename)[0]
                 
@@ -342,11 +340,9 @@ if uploaded_files:
                                 # --- LIVE IMAGE PREVIEW (POST-ROTATION) ---
                                 display_page = fitz_doc[current_page_num - 1]
                                 
-                                # Render the thumbnail with the rotation already applied
                                 mat = fitz.Matrix(0.3, 0.3).prerotate(degrees_to_fix)
                                 thumb_pix = display_page.get_pixmap(matrix=mat)
                                 
-                                # Dynamically calculate width to lock height at ~500px
                                 target_height = 500
                                 aspect_ratio = thumb_pix.width / thumb_pix.height
                                 calculated_width = int(target_height * aspect_ratio)
@@ -371,7 +367,6 @@ if uploaded_files:
                                 }
 
                                 if out_pdf_path and target_folder_name == 'drawings':
-                                    # Specific status update for drawings undergoing text extraction
                                     status_text.text(f"Processing: {filename} (Page {current_page_num}/{total_pages})")
                                     dwg_info = extract_drawing_info(out_pdf_path, ocr, client)
                                     
@@ -381,11 +376,9 @@ if uploaded_files:
                                     row_data["Drawing Title"] = title
                                     row_data["Drawing Number"] = number
                                     
-                                    # --- LIVE EXTRACTION LOG ---
                                     if title or number:
                                         live_log_data.append({"Drawing Number": number, "Drawing Title": title})
                                         log_placeholder.dataframe(live_log_data, use_container_width=True)
-                                    # ---------------------------
                                 else:
                                     row_data["Drawing Title"] = ""
                                     row_data["Drawing Number"] = ""
@@ -405,10 +398,11 @@ if uploaded_files:
 
                 progress_bar.progress((idx + 1) / total_files)
 
-            # --- CLEANUP DASHBOARD ---
+            # --- PRE-FINALIZATION CLEANUP ---
+            live_header.empty()
             image_placeholder.empty()
             log_placeholder.empty()
-            status_text.text("Finalizing files...")
+            status_text.text("Finalizing files...") # Briefly show this while pandas works
 
             if GENERATE_CSV_REPORT and all_results:
                 df = pd.DataFrame(all_results)
@@ -422,6 +416,10 @@ if uploaded_files:
                 csv_path = os.path.join(output_dir, 'drawing_registry.csv')
                 df.to_csv(csv_path, index=False)
                 st.dataframe(df)
+            
+            # --- FINAL UI CLEANUP ---
+            status_text.empty() # Remove the "Finalizing files..." text
+            progress_bar.empty() # Remove the progress bar to make the final screen totally clean
             
             if not (SAVE_DRAWINGS_FOLDER or SAVE_NON_DRAWINGS_FOLDER or GENERATE_CSV_REPORT):
                 st.warning("⚠️ No output preferences were selected, so no files were saved or generated.")
