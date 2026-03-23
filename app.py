@@ -1,10 +1,15 @@
+import streamlit as st
 import os
 import gc
 import json
-import time
 import tempfile
+import shutil
 import zipfile
-import streamlit as st
+from PIL import Image
+from paddleocr import PaddleOCR
+from pdf2image import convert_from_path
+from google import genai
+from google.genai import types
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,76 +18,141 @@ import fitz  # PyMuPDF
 import cv2
 import numpy as np
 import pandas as pd
-from pypdf import PdfReader, PdfWriter
-from PIL import Image, ImageDraw
-from google import genai
-from google.genai import types
-from pydantic import BaseModel, Field
 
-# Bypass the Decompression Bomb pixel limit
-Image.MAX_IMAGE_PIXELS = None
-
-# --- Configuration & Mappings ---
-BATCH_SIZE = 4 
+# ==========================================
+# CONFIGURATION & MAPPINGS
+# ==========================================
+BATCH_SIZE = 1
 CLASS_NAMES = ['drawings_0', 'drawings_180', 'drawings_270', 'drawings_90', 'non_drawings']
 
+GEMINI_SYSTEM_INSTRUCTION = """
+Task: Extract 'Drawing Title' and 'Drawing Number' from messy construction drawing OCR text. Output clean values or "" if missing.
+
+RULES:
+- TITLE: Target the primary sheet subject. Combine multi-line fragments. Intelligently reconstruct mangled OCR into standard engineering terms.
+- EXCLUDE FROM TITLE: Overarching project/facility names, firm names, dates, and internal canvas labels.
+- NUMBER: Target the unique alphanumeric sheet ID. Often located at the very end of the text block or next to distorted anchors.
+- EXCLUDE FROM NUMBER: Decoy numbers like referenced drawings, dates, scales, or detached revision codes.
+"""
+
+GEMINI_CONFIG = types.GenerateContentConfig(
+    system_instruction=GEMINI_SYSTEM_INSTRUCTION,
+    response_mime_type="application/json",
+    response_schema={
+        "type": "OBJECT",
+        "properties": {
+            "drawing_title": {"type": "STRING"},
+            "drawing_number": {"type": "STRING"},
+        },
+        "required": ["drawing_title", "drawing_number"]
+    }
+)
+
 FOLDER_MAPPING = {
-    'drawings_0': 'drawings', 'drawings_90': 'drawings',
-    'drawings_180': 'drawings', 'drawings_270': 'drawings',
+    'drawings_0': 'drawings', 'drawings_90': 'drawings', 
+    'drawings_180': 'drawings', 'drawings_270': 'drawings', 
     'non_drawings': 'non_drawings'
 }
 
 ROTATION_FIXES = {
-    'drawings_0': 0, 'drawings_90': 270,
-    'drawings_180': 180, 'drawings_270': 90,
+    'drawings_0': 0, 'drawings_90': 270, 
+    'drawings_180': 180, 'drawings_270': 90, 
     'non_drawings': 0
 }
 
-# --- PyTorch Transforms ---
 TO_TENSOR = transforms.ToTensor()
 NORMALIZE = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
-class DrawingMetadata(BaseModel):
-    drawing_title: str = Field(description="The formal title or name of the drawing. Leave empty if not found.")
-    drawing_number: str = Field(description="The specific drawing number or reference code. Leave empty if not found.")
-
 # ==========================================
-# CACHED RESOURCES
+# CACHED RESOURCE LOADING
 # ==========================================
 @st.cache_resource
-def get_llm_client():
-    try:
-        api_key = st.secrets["GOOGLE_API_KEY"]
-        return genai.Client(api_key=api_key)
-    except KeyError:
-        st.error("🚨 GOOGLE_API_KEY is missing! Please add it in the Streamlit App Settings -> Secrets.")
-        return None
-
-@st.cache_resource
-def load_pytorch_model():
-    model_path = "drawing_classifier.pth" 
+def load_resnet_model(model_path="drawing_classifier.pth"):
     device = torch.device("cpu")
-    
     model = models.resnet18(weights=None)
     num_ftrs = model.fc.in_features
     model.fc = nn.Sequential(
         nn.Dropout(p=0.5),
         nn.Linear(num_ftrs, len(CLASS_NAMES))
     )
-    if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
-    else:
-        st.error(f"🚨 Model file '{model_path}' not found in the repository!")
+    
+    if not os.path.exists(model_path):
+        st.error(f"Model file '{model_path}' not found in the repository. Please upload it.")
+        st.stop()
         
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model = model.to(device)
     model.eval()
     return model, device
 
+@st.cache_resource
+def load_ocr():
+    return PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
+
+@st.cache_resource
+def load_gemini_client():
+    return genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
 # ==========================================
-# CORE FUNCTIONS
+# PROCESSING FUNCTIONS
 # ==========================================
+def extract_drawing_info(pdf_src: str, ocr: PaddleOCR, client: genai.Client) -> dict:
+    def get_crops(image):
+        width, height = image.size
+        crops = []
+        A1_AREA = 7016 * 9933
+        is_large = (width * height) > A1_AREA
+
+        if height > width:
+            crop_boundary = int(height * 0.8)
+            if is_large:
+                mid_w = width // 2
+                crops.extend([image.crop((0, crop_boundary, mid_w, height)), 
+                              image.crop((mid_w, crop_boundary, width, height))])
+            else:
+                crops.append(image.crop((0, crop_boundary, width, height)))
+        else:
+            bottom_crop_boundary = int(height * 0.8)
+            right_crop_boundary = int(width * 0.8)
+            if is_large:
+                mid_w, mid_h = width // 2, height // 2
+                crops.extend([image.crop((0, bottom_crop_boundary, mid_w, height)),
+                              image.crop((mid_w, bottom_crop_boundary, width, height)),
+                              image.crop((right_crop_boundary, 0, width, mid_h)),
+                              image.crop((right_crop_boundary, mid_h, width, height))])
+            else:
+                crops.extend([image.crop((0, bottom_crop_boundary, width, height)),
+                              image.crop((right_crop_boundary, 0, width, height))])
+        return crops
+
+    images = convert_from_path(pdf_src, dpi=300)
+    if not images: return {"drawing_title": "", "drawing_number": ""}
+
+    image = images[0]
+    crops = get_crops(image)
+    raw_text = ""
+
+    for crop_img in crops:
+        img_array = np.array(crop_img)
+        result = ocr.ocr(img_array, cls=True)
+        if result and result[0]:
+            raw_text += " " + " ".join([line[1][0] for line in result[0]])
+
+    del images, image, crops
+    gc.collect()
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=raw_text.strip(),
+            config=GEMINI_CONFIG
+        )
+        return json.loads(response.text)
+    except Exception as e:
+        return {"drawing_title": "", "drawing_number": ""}
+
 def preprocess_pdf_page(fitz_page) -> torch.Tensor:
-    pix = fitz_page.get_pixmap(dpi=150)
+    pix = fitz_page.get_pixmap(dpi=100)
     img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, 3))
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     kernel = np.ones((2, 2), np.uint8)
@@ -102,161 +172,198 @@ def classify_image_batch(batch_tensors: list, model: nn.Module, device: torch.de
     conf_percents = [conf.item() * 100 for conf in confidences]
     return pred_classes, conf_percents
 
-def extract_metadata_from_text(raw_text, client):
-    if not raw_text or not raw_text.strip() or not client:
-        return "", ""
-    prompt = f"""
-    You are an expert engineering document assistant. Extract the exact Drawing Title and Drawing Number from the raw text below.
-    If a value cannot be confidently found, output an empty string "".
-    Do not include revision numbers in the Drawing Number unless attached directly to it.
-
-    Raw Text:
-    {raw_text}
-    """
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=DrawingMetadata,
-                temperature=0.1
-            )
-        )
-        data = json.loads(response.text)
-        title = data.get("drawing_title", "").strip()
-        number = data.get("drawing_number", "").strip()
-        
-        if title.lower() in ["not found", "none", "n/a", "null"]: title = ""
-        if number.lower() in ["not found", "none", "n/a", "null"]: number = ""
-        return title, number
-    except Exception:
-        return "", ""
-
-def extract_metadata_from_image(fitz_page, client):
-    if not client: return "", ""
+def process_and_save_page(fitz_doc, pred_class: str, output_dir: str, base_name: str, current_page_num: int, total_pages: int) -> str:
+    target_folder_name = FOLDER_MAPPING[pred_class]
+    out_folder = os.path.join(output_dir, target_folder_name)
+    os.makedirs(out_folder, exist_ok=True)
     
-    pix = fitz_page.get_pixmap(dpi=150) 
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    out_pdf_name = f"{base_name}.pdf" if total_pages == 1 else f"{base_name}_p{current_page_num}.pdf"
+    out_pdf_path = os.path.join(out_folder, out_pdf_name)
+
+    new_pdf = fitz.open()
+    page_index = current_page_num - 1
+    new_pdf.insert_pdf(fitz_doc, from_page=page_index, to_page=page_index)
+
+    degrees_to_fix = ROTATION_FIXES.get(pred_class, 0)
+    if degrees_to_fix != 0:
+        page = new_pdf[0]
+        page.set_rotation((page.rotation + degrees_to_fix) % 360)
+
+    new_pdf.save(out_pdf_path, garbage=4, deflate=True)
+    new_pdf.close()
+    return out_pdf_path
+
+def create_zip_file(folder_path, output_filename="processed_drawings.zip"):
+    shutil.make_archive(output_filename.replace('.zip', ''), 'zip', folder_path)
+    return output_filename
+
+# ==========================================
+# STREAMLIT USER INTERFACE
+# ==========================================
+st.set_page_config(page_title="Drawing Registry App", layout="wide")
+st.title("🏗️ Construction Drawing Registry App")
+st.markdown("Upload your PDF drawings. The AI will classify them, fix their rotation, and generate drawing list.")
+
+with st.spinner("Loading AI Models... (This takes a moment on startup)"):
+    model, device = load_resnet_model()
+    ocr = load_ocr()
+    client = load_gemini_client()
+
+uploaded_files = st.file_uploader("Upload PDF Files", type="pdf", accept_multiple_files=True)
+
+# User Toggles Section
+if uploaded_files:
+    st.markdown("#### ⚙️ Output Preferences")
     
-    # Draw a white rectangle over the main drawing area to reduce visual noise
-    width, height = img.size
-    draw = ImageDraw.Draw(img)
-    mask_box = [0, 0, width * 0.80, height * 0.85]
-    draw.rectangle(mask_box, fill="white")
+    SAVE_DRAWINGS_FOLDER = st.toggle("Save 'Drawings' Folder", value=True)
+    SAVE_NON_DRAWINGS_FOLDER = st.toggle("Save 'Non-Drawings' Folder", value=True)
+    GENERATE_CSV_REPORT = st.toggle("Generate CSV Report", value=True)
     
-    prompt = """
-    You are an expert engineering document assistant. Look at this engineering drawing.
-    Extract the exact Drawing Title and Drawing Number from the title block.
-    If a value cannot be confidently found, output an empty string "".
-    Do not include revision numbers in the Drawing Number unless attached directly to it.
-    """
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[prompt, img],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=DrawingMetadata,
-                temperature=0.1
-            )
-        )
-        data = json.loads(response.text)
-        title = data.get("drawing_title", "").strip()
-        number = data.get("drawing_number", "").strip()
-        
-        if title.lower() in ["not found", "none", "n/a", "null"]: title = ""
-        if number.lower() in ["not found", "none", "n/a", "null"]: number = ""
-        return title, number
-    except Exception as e:
-        print(f"Vision extraction failed: {e}")
-        return "", ""
+    INCLUDE_MODEL_OUTPUT = False
+    if GENERATE_CSV_REPORT:
+        INCLUDE_MODEL_OUTPUT = st.toggle("Include Model Predictions & Confidence in CSV", value=False)
 
-def extract_drawing_details(fitz_page, client):
-    page_rect = fitz_page.rect
-    w, h = page_rect.width, page_rect.height
-    
-    text_right = fitz_page.get_text("text", clip=fitz.Rect(w * 0.8, 0, w, h))
-    text_bottom = fitz_page.get_text("text", clip=fitz.Rect(0, h * 0.85, w * 0.8, h))
-    native_text = (text_right + " " + text_bottom).strip()
-    
-    if len(native_text) > 20:
-        words = native_text.split()
-        limited_text = " | ".join(words[-100:])
-        return extract_metadata_from_text(limited_text, client)
-    else:
-        return extract_metadata_from_image(fitz_page, client)
+    if st.button("Process Drawings"):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_dir = os.path.join(temp_dir, "inputs")
+            output_dir = os.path.join(temp_dir, "outputs")
+            os.makedirs(input_dir, exist_ok=True)
+            os.makedirs(output_dir, exist_ok=True)
+            
+            all_results = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-def process_single_pdf(pdf_path: str, file_display_name: str, output_dir: str, model: nn.Module, device: torch.device, client, save_dwg, save_non_dwg) -> list:
-    base_name = os.path.splitext(os.path.basename(pdf_path))[0]
-    results = []
+            for file in uploaded_files:
+                file_path = os.path.join(input_dir, file.name)
+                with open(file_path, "wb") as f:
+                    f.write(file.getbuffer())
 
-    try:
-        fitz_doc = fitz.open(pdf_path)
-        pdf_reader = PdfReader(pdf_path)
-        total_pages = len(fitz_doc)
+            pdf_files = os.listdir(input_dir)
+            total_files = len(pdf_files)
 
-        batch_tensors = []
-        batch_page_nums = []
-        batch_fitz_pages = []
+            for idx, filename in enumerate(pdf_files):
+                status_text.text(f"Processing: {filename} ({idx + 1}/{total_files})")
+                pdf_path = os.path.join(input_dir, filename)
+                base_name = os.path.splitext(filename)[0]
+                
+                try:
+                    fitz_doc = fitz.open(pdf_path)
+                    total_pages = len(fitz_doc)
+                    batch_tensors, batch_page_nums = [], []
 
-        for page_num in range(total_pages):
-            fitz_page = fitz_doc[page_num]
-            batch_tensors.append(preprocess_pdf_page(fitz_page))
-            batch_page_nums.append(page_num + 1)
-            batch_fitz_pages.append(fitz_page)
+                    for page_num in range(total_pages):
+                        fitz_page = fitz_doc[page_num]
+                        tensor = preprocess_pdf_page(fitz_page)
+                        batch_tensors.append(tensor)
+                        batch_page_nums.append(page_num + 1)
 
-            if len(batch_tensors) == BATCH_SIZE or page_num == total_pages - 1:
-                pred_classes, conf_percents = classify_image_batch(batch_tensors, model, device)
+                        if len(batch_tensors) == BATCH_SIZE or page_num == total_pages - 1:
+                            pred_classes, conf_percents = classify_image_batch(batch_tensors, model, device)
 
-                for i, (pred_class, conf_percent) in enumerate(zip(pred_classes, conf_percents)):
-                    current_page_num = batch_page_nums[i]
-                    target_folder_name = FOLDER_MAPPING[pred_class]
-                    current_fitz_page = batch_fitz_pages[i]
+                            for i, (pred_class, conf_percent) in enumerate(zip(pred_classes, conf_percents)):
+                                current_page_num = batch_page_nums[i]
+                                target_folder_name = FOLDER_MAPPING[pred_class]
+                                
+                                out_pdf_path = None
+                                
+                                # Conditional Folder Saving
+                                if (target_folder_name == 'drawings' and SAVE_DRAWINGS_FOLDER) or \
+                                   (target_folder_name == 'non_drawings' and SAVE_NON_DRAWINGS_FOLDER):
+                                    out_pdf_path = process_and_save_page(fitz_doc, pred_class, output_dir, base_name, current_page_num, total_pages)
+
+                                row_data = {
+                                    "Folder": target_folder_name,
+                                    "Filename": filename,
+                                    "Page": current_page_num
+                                }
+
+                                # Metadata Extraction (Only if it's a drawing AND it was saved)
+                                if out_pdf_path and target_folder_name == 'drawings':
+                                    status_text.text(f"Extracting text from: {filename} (Page {current_page_num})")
+                                    dwg_info = extract_drawing_info(out_pdf_path, ocr, client)
+                                    row_data["Drawing Title"] = dwg_info.get("drawing_title", "")
+                                    row_data["Drawing Number"] = dwg_info.get("drawing_number", "")
+                                else:
+                                    row_data["Drawing Title"] = ""
+                                    row_data["Drawing Number"] = ""
+
+                                # Conditional Model Output
+                                if INCLUDE_MODEL_OUTPUT:
+                                    row_data["Prediction"] = pred_class
+                                    row_data["Confidence (%)"] = round(conf_percent, 2)
+
+                                all_results.append(row_data)
+
+                            batch_tensors, batch_page_nums = [], []
+                            gc.collect()
+
+                    fitz_doc.close()
+                except Exception as e:
+                    st.error(f"Error processing {filename}: {e}")
+
+                progress_bar.progress((idx + 1) / total_files)
+
+            status_text.text("Finalizing files...")
+
+            # Conditional CSV Generation
+            if GENERATE_CSV_REPORT and all_results:
+                df = pd.DataFrame(all_results)
+                
+                cols = ['Folder', 'Filename', 'Page', 'Drawing Title', 'Drawing Number']
+                if INCLUDE_MODEL_OUTPUT:
+                    cols.extend(['Prediction', 'Confidence (%)'])
                     
-                    drawing_title = ""
-                    drawing_no = ""
-                    
-                    degrees_to_fix = ROTATION_FIXES.get(pred_class, 0)
-                    pdf_page_pypdf = pdf_reader.pages[current_page_num - 1]
-                    
-                    if degrees_to_fix != 0:
-                        pdf_page_pypdf.rotate(degrees_to_fix)
-                        current_fitz_page.set_rotation((current_fitz_page.rotation + degrees_to_fix) % 360)
-                    
-                    if target_folder_name == 'drawings':
-                        drawing_title, drawing_no = extract_drawing_details(current_fitz_page, client)
+                df = df[cols].sort_values(by=['Folder', 'Filename']).reset_index(drop=True)
+                
+                csv_path = os.path.join(output_dir, 'drawing_registry.csv')
+                df.to_csv(csv_path, index=False)
+                st.dataframe(df)
+            
+            # Final Zip & Download
+            if not (SAVE_DRAWINGS_FOLDER or SAVE_NON_DRAWINGS_FOLDER or GENERATE_CSV_REPORT):
+                st.warning("⚠️ No output preferences were selected, so no files were saved or generated.")
+            else:
+                st.success("✅ Processing Complete!")
+                zip_path = create_zip_file(output_dir, "processed_drawings.zip")
+                
+                with open(zip_path, "rb") as fp:
+                    st.download_button(
+                        label="📥 Download Zipped Registry",
+                        data=fp,
+                        file_name="processed_drawings.zip",
+                        mime="application/zip"
+                    )
 
-                    if (target_folder_name == 'drawings' and save_dwg) or \
-                       (target_folder_name == 'non_drawings' and save_non_dwg):
-                        
-                        pdf_writer = PdfWriter()
-                        pdf_writer.add_page(pdf_page_pypdf)
-                        out_folder = os.path.join(output_dir, target_folder_name)
-                        os.makedirs(out_folder, exist_ok=True)
-                        out_pdf_path = os.path.join(out_folder, f"{base_name}_page_{current_page_num}.pdf")
-                        
-                        with open(out_pdf_path, "wb") as f_out:
-                            pdf_writer.write(f_out)
 
-                    results.append({
-                        "Folder": target_folder_name,
-                        "Filename": os.path.basename(pdf_path),
-                        "Page": current_page_num,
-                        "Drawing No.": drawing_no,
-                        "Drawing Title": drawing_title,
-                        "Prediction": pred_class,
-                        "Confidence %": round(conf_percent, 2)
-                    })
 
-                batch_tensors, batch_page_nums, batch_fitz_pages = [], [], []
-                gc.collect()
 
-        fitz_doc.close()
-    except Exception as e:
-        st.error(f"Error processing {file_display_name}: {e}")
 
-    return results
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # ==========================================
 # STREAMLIT USER INTERFACE
