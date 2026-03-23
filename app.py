@@ -228,14 +228,39 @@ st.set_page_config(page_title="Drawing Registry App", layout="wide")
 st.title("🏗️ Construction Drawing Registry App")
 st.markdown("Upload your PDF drawings. The AI will classify them, fix their rotation, and generate drawing list.")
 
+# Initialize session state to handle clearing the file uploader
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
 with st.spinner("Loading AI Models... (This takes a moment on startup)"):
     model, device = load_resnet_model()
     ocr = load_ocr()
     client = load_gemini_client()
 
-uploaded_files = st.file_uploader("", type="pdf", accept_multiple_files=True)
+# 1. Original Uploader Layout
+uploaded_files = st.file_uploader(
+    "Upload PDF Files", 
+    type="pdf", 
+    accept_multiple_files=True, 
+    key=str(st.session_state.uploader_key)
+)
 
 if uploaded_files:
+    # 3. Handle Duplicate Filenames
+    unique_files = {}
+    duplicates = []
+    
+    for file in uploaded_files:
+        if file.name in unique_files:
+            duplicates.append(file.name)
+        else:
+            unique_files[file.name] = file
+            
+    if duplicates:
+        st.warning(f"⚠️ Removed duplicate files with the same name: {', '.join(set(duplicates))}")
+        
+    files_to_process = list(unique_files.values())
+
     st.markdown("#### ⚙️ Output Preferences")
     
     SAVE_DRAWINGS_FOLDER = st.toggle("Save 'Drawings' Folder", value=True)
@@ -246,7 +271,19 @@ if uploaded_files:
     if GENERATE_CSV_REPORT:
         INCLUDE_MODEL_OUTPUT = st.toggle("Include Model Predictions & Confidence in CSV", value=False)
 
-    if st.button("Process Drawings"):
+    st.write("---") # Visual divider before actions
+
+    # 1 & 2 & 3. Button Layout and Primary Styling
+    col1, col2, col3 = st.columns([2, 2, 4]) # Adjust proportions to keep buttons tidy
+    
+    with col1:
+        start_processing = st.button("▶️ Start Processing", type="primary", use_container_width=True)
+    with col2:
+        if st.button("🗑️ Clear Uploads", use_container_width=True):
+            st.session_state.uploader_key += 1
+            st.rerun()
+
+    if start_processing:
         with tempfile.TemporaryDirectory() as temp_dir:
             input_dir = os.path.join(temp_dir, "inputs")
             output_dir = os.path.join(temp_dir, "outputs")
@@ -257,7 +294,8 @@ if uploaded_files:
             progress_bar = st.progress(0)
             status_text = st.empty()
 
-            for file in uploaded_files:
+            # Save only the unique files
+            for file in files_to_process:
                 file_path = os.path.join(input_dir, file.name)
                 with open(file_path, "wb") as f:
                     f.write(file.getbuffer())
@@ -266,7 +304,9 @@ if uploaded_files:
             total_files = len(pdf_files)
 
             for idx, filename in enumerate(pdf_files):
-                status_text.text(f"Processing: {filename} ({idx + 1}/{total_files})")
+                # Default status for non-drawings or pre-processing
+                status_text.text(f"Processing: {filename}")
+                
                 pdf_path = os.path.join(input_dir, filename)
                 base_name = os.path.splitext(filename)[0]
                 
@@ -301,7 +341,8 @@ if uploaded_files:
                                 }
 
                                 if out_pdf_path and target_folder_name == 'drawings':
-                                    status_text.text(f"Extracting text from: {filename} (Page {current_page_num})")
+                                    # 2. Specific status update for drawings undergoing text extraction
+                                    status_text.text(f"Processing: {filename} (Page {current_page_num}/{total_pages})")
                                     dwg_info = extract_drawing_info(out_pdf_path, ocr, client)
                                     row_data["Drawing Title"] = dwg_info.get("drawing_title", "")
                                     row_data["Drawing Number"] = dwg_info.get("drawing_number", "")
@@ -346,9 +387,11 @@ if uploaded_files:
                 zip_path = create_zip_file(output_dir, "processed_drawings.zip")
                 
                 with open(zip_path, "rb") as fp:
+                    # Make the download button primary color as well
                     st.download_button(
                         label="📥 Download Zipped Registry",
                         data=fp,
                         file_name="processed_drawings.zip",
-                        mime="application/zip"
+                        mime="application/zip",
+                        type="primary" 
                     )
