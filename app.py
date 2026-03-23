@@ -1,3 +1,18 @@
+import subprocess
+import sys
+
+# --- START: OPENCV GUARDIAN ---
+# Intercept broken GUI OpenCV packages sneaked in by PaddleOCR
+try:
+    import cv2
+except ImportError:
+    print("Repairing OpenCV dependencies for Streamlit Cloud...")
+    # 1. Force uninstall the broken GUI packages
+    subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "opencv-python", "opencv-contrib-python"])
+    # 2. Force install the safe headless packages
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "opencv-python-headless", "opencv-contrib-python-headless"])
+# --- END: OPENCV GUARDIAN ---
+
 import streamlit as st
 import os
 import gc
