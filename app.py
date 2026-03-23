@@ -282,6 +282,108 @@ if uploaded_files:
             st.session_state.uploader_key += 1
             st.rerun()
 
+    # if start_processing:
+    #         with tempfile.TemporaryDirectory() as temp_dir:
+    #             input_dir = os.path.join(temp_dir, "inputs")
+    #             output_dir = os.path.join(temp_dir, "outputs")
+    #             os.makedirs(input_dir, exist_ok=True)
+    #             os.makedirs(output_dir, exist_ok=True)
+                
+    #             all_results = []
+                
+    #             # --- UI PLACEHOLDERS ---
+    #             progress_bar = st.progress(0)
+    #             status_text = st.empty()
+    #             image_placeholder = st.empty() # Creates a dedicated box for our live preview
+
+    #             for file in files_to_process:
+    #                 file_path = os.path.join(input_dir, file.name)
+    #                 with open(file_path, "wb") as f:
+    #                     f.write(file.getbuffer())
+
+    #             pdf_files = os.listdir(input_dir)
+    #             total_files = len(pdf_files)
+
+    #             for idx, filename in enumerate(pdf_files):
+    #                 status_text.text(f"Processing: {filename}")
+    #                 pdf_path = os.path.join(input_dir, filename)
+    #                 base_name = os.path.splitext(filename)[0]
+                    
+    #                 try:
+    #                     fitz_doc = fitz.open(pdf_path)
+    #                     total_pages = len(fitz_doc)
+    #                     batch_tensors, batch_page_nums = [], []
+
+    #                     for page_num in range(total_pages):
+    #                         fitz_page = fitz_doc[page_num]
+                            
+    #                         # --- LIVE IMAGE PREVIEW ---
+    #                         # Generate a fast, low-res thumbnail to save RAM and time
+    #                         thumb_pix = fitz_page.get_pixmap(matrix=fitz.Matrix(0.3, 0.3))
+    #                         image_placeholder.image(
+    #                             thumb_pix.tobytes("png"), 
+    #                             caption=f"Extracting text from {filename} (Page {page_num + 1})", 
+    #                             width=350
+    #                         )
+    #                         # --------------------------
+
+    #                         tensor = preprocess_pdf_page(fitz_page)
+    #                         batch_tensors.append(tensor)
+    #                         batch_page_nums.append(page_num + 1)
+
+    #                         if len(batch_tensors) == BATCH_SIZE or page_num == total_pages - 1:
+    #                             pred_classes, conf_percents = classify_image_batch(batch_tensors, model, device)
+
+    #                             for i, (pred_class, conf_percent) in enumerate(zip(pred_classes, conf_percents)):
+    #                                 current_page_num = batch_page_nums[i]
+    #                                 target_folder_name = FOLDER_MAPPING[pred_class]
+                                    
+    #                                 out_pdf_path = None
+                                    
+    #                                 if (target_folder_name == 'drawings' and SAVE_DRAWINGS_FOLDER) or \
+    #                                    (target_folder_name == 'non_drawings' and SAVE_NON_DRAWINGS_FOLDER):
+    #                                     out_pdf_path = process_and_save_page(fitz_doc, pred_class, output_dir, base_name, current_page_num, total_pages)
+
+    #                                 row_data = {
+    #                                     "Folder": target_folder_name,
+    #                                     "Filename": filename,
+    #                                     "Page": current_page_num
+    #                                 }
+
+    #                                 if out_pdf_path and target_folder_name == 'drawings':
+    #                                     status_text.text(f"Processing: {filename} (Page {current_page_num}/{total_pages})")
+    #                                     dwg_info = extract_drawing_info(out_pdf_path, ocr, client)
+                                        
+    #                                     title = dwg_info.get("drawing_title", "")
+    #                                     number = dwg_info.get("drawing_number", "")
+                                        
+    #                                     row_data["Drawing Title"] = title
+    #                                     row_data["Drawing Number"] = number
+                                            
+    #                                 else:
+    #                                     row_data["Drawing Title"] = ""
+    #                                     row_data["Drawing Number"] = ""
+
+    #                                 if INCLUDE_MODEL_OUTPUT:
+    #                                     row_data["Prediction"] = pred_class
+    #                                     row_data["Confidence (%)"] = round(conf_percent, 2)
+
+    #                                 all_results.append(row_data)
+
+    #                             batch_tensors, batch_page_nums = [], []
+    #                             gc.collect()
+
+    #                     fitz_doc.close()
+    #                 except Exception as e:
+    #                     st.error(f"Error processing {filename}: {e}")
+
+    #                 progress_bar.progress((idx + 1) / total_files)
+
+    #             # --- CLEANUP ---
+    #             # Remove the preview image and status text once everything is done
+    #             image_placeholder.empty() 
+    #             status_text.text("Finalizing files...")
+
     if start_processing:
             with tempfile.TemporaryDirectory() as temp_dir:
                 input_dir = os.path.join(temp_dir, "inputs")
@@ -290,11 +392,18 @@ if uploaded_files:
                 os.makedirs(output_dir, exist_ok=True)
                 
                 all_results = []
+                live_log_data = [] # New list to feed our live table
                 
-                # --- UI PLACEHOLDERS ---
+                # --- UI DASHBOARD PLACEHOLDERS ---
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                image_placeholder = st.empty() # Creates a dedicated box for our live preview
+                
+                # Split the screen into two columns for the live view
+                dash_col1, dash_col2 = st.columns([1, 1])
+                with dash_col1:
+                    image_placeholder = st.empty() 
+                with dash_col2:
+                    log_placeholder = st.empty() 
 
                 for file in files_to_process:
                     file_path = os.path.join(input_dir, file.name)
@@ -317,15 +426,18 @@ if uploaded_files:
                         for page_num in range(total_pages):
                             fitz_page = fitz_doc[page_num]
                             
-                            # --- LIVE IMAGE PREVIEW ---
-                            # Generate a fast, low-res thumbnail to save RAM and time
+                            # --- LIVE IMAGE (FIXED HEIGHT WORKAROUND) ---
+                            target_height = 500 # Set your desired fixed height in pixels here
+                            aspect_ratio = fitz_page.rect.width / fitz_page.rect.height
+                            calculated_width = int(target_height * aspect_ratio)
+
                             thumb_pix = fitz_page.get_pixmap(matrix=fitz.Matrix(0.3, 0.3))
                             image_placeholder.image(
                                 thumb_pix.tobytes("png"), 
                                 caption=f"Live View: {filename} (Page {page_num + 1})", 
-                                width=350
+                                width=calculated_width
                             )
-                            # --------------------------
+                            # --------------------------------------------
 
                             tensor = preprocess_pdf_page(fitz_page)
                             batch_tensors.append(tensor)
@@ -360,11 +472,11 @@ if uploaded_files:
                                         row_data["Drawing Title"] = title
                                         row_data["Drawing Number"] = number
                                         
-                                        # --- TOAST NOTIFICATION ---
-                                        # Pop a slick notification if we found a drawing number
-                                        if number:
-                                            st.toast(f"Extracted: {number}", icon="✅")
-                                        # --------------------------
+                                        # --- LIVE EXTRACTION LOG ---
+                                        if title or number:
+                                            live_log_data.append({"Number": number, "Title": title})
+                                            log_placeholder.dataframe(live_log_data, use_container_width=True)
+                                        # ---------------------------
                                             
                                     else:
                                         row_data["Drawing Title"] = ""
@@ -386,8 +498,9 @@ if uploaded_files:
                     progress_bar.progress((idx + 1) / total_files)
 
                 # --- CLEANUP ---
-                # Remove the preview image and status text once everything is done
+                # Clear the live dashboard elements to make room for the final results
                 image_placeholder.empty() 
+                log_placeholder.empty()
                 status_text.text("Finalizing files...")
 
                 if GENERATE_CSV_REPORT and all_results:
