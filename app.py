@@ -28,7 +28,7 @@ Task: Extract 'Drawing Title' and 'Drawing Number' from messy construction drawi
 
 RULES:
 - TITLE: Target the primary sheet subject. Combine multi-line fragments. Intelligently reconstruct mangled OCR into standard engineering terms.
-- EXCLUDE FROM TITLE: Overarching project names, company names, dates labels.
+- EXCLUDE FROM TITLE: Overarching project names, company/departments names, dates, and internal canvas labels.
 - NUMBER: Target the unique alphanumeric sheet ID. Often located at the very end of the text block or next to distorted anchors.
 - EXCLUDE FROM NUMBER: Decoy numbers like referenced drawings, dates, scales, or detached revision codes.
 """
