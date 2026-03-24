@@ -175,22 +175,14 @@ def extract_drawing_info(pdf_src: str, ocr: easyocr.Reader, client: genai.Client
         print(f"Gemini API Error: {e}")
         return {"drawing_title": "", "drawing_number": ""}
 
-def preprocess_pdf_page(pix) -> torch.Tensor:
-    # Use the lightweight thumbnail we already generated for the UI
-    img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, pix.n))
-    
-    # Convert RGBA to RGB if the PDF had transparency
-    if pix.n == 4:
-        img_np = cv2.cvtColor(img_np, cv2.COLOR_RGBA2RGB)
-        
+def preprocess_pdf_page(fitz_page) -> torch.Tensor:
+    pix = fitz_page.get_pixmap(dpi=100)
+    img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, 3))
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     kernel = np.ones((2, 2), np.uint8)
     thickened_gray = cv2.erode(gray, kernel, iterations=1)
-    
-    # Resize the already-small image to exactly 448x448 for the AI
     final_img = cv2.resize(thickened_gray, (448, 448), interpolation=cv2.INTER_AREA)
     final_img_rgb = cv2.cvtColor(final_img, cv2.COLOR_GRAY2RGB)
-    
     tensor = TO_TENSOR(final_img_rgb)
     return NORMALIZE(tensor)
 
@@ -349,25 +341,7 @@ if uploaded_files:
 
                     for page_num in range(total_pages):
                         fitz_page = fitz_doc[page_num]
-                        
-                        # 1. RENDER ONCE: Generate a lightweight UI thumbnail
-                        mat = fitz.Matrix(0.3, 0.3) 
-                        thumb_pix = fitz_page.get_pixmap(matrix=mat)
-                        
-                        # 2. SHOW LIVE VIEW
-                        target_height = 500
-                        aspect_ratio = thumb_pix.width / thumb_pix.height
-                        calculated_width = int(target_height * aspect_ratio)
-                        
-                        image_placeholder.image(
-                            thumb_pix.tobytes("png"), 
-                            caption=f"Live View: {filename} (Page {page_num + 1})", 
-                            width=calculated_width
-                        )
-
-                        # 3. REUSE FOR AI CLASSIFICATION
-                        # Pass the exact same thumbnail directly to the AI
-                        tensor = preprocess_pdf_page(thumb_pix)
+                        tensor = preprocess_pdf_page(fitz_page)
                         batch_tensors.append(tensor)
                         batch_page_nums.append(page_num + 1)
 
@@ -377,6 +351,25 @@ if uploaded_files:
                             for i, (pred_class, conf_percent) in enumerate(zip(pred_classes, conf_percents)):
                                 current_page_num = batch_page_nums[i]
                                 target_folder_name = FOLDER_MAPPING[pred_class]
+                                degrees_to_fix = ROTATION_FIXES.get(pred_class, 0)
+                                
+                                # --- LIVE IMAGE PREVIEW ---
+                                display_page = fitz_doc[current_page_num - 1]
+                                
+                                # Standard scaling matrix, no rotation math applied
+                                mat = fitz.Matrix(0.3, 0.3) 
+                                thumb_pix = display_page.get_pixmap(matrix=mat)
+                                
+                                target_height = 500
+                                aspect_ratio = thumb_pix.width / thumb_pix.height
+                                calculated_width = int(target_height * aspect_ratio)
+                                
+                                image_placeholder.image(
+                                    thumb_pix.tobytes("png"), 
+                                    caption=f"{filename} (Page {current_page_num})", 
+                                    width=calculated_width
+                                )
+                                # ------------------------------------------
                                 
                                 out_pdf_path = None
                                 
@@ -413,9 +406,6 @@ if uploaded_files:
                                 all_results.append(row_data)
 
                             batch_tensors, batch_page_nums = [], []
-                            
-                            # Clean up the reused thumbnail from memory
-                            del thumb_pix 
                             gc.collect()
                         
                         processed_pages += 1
