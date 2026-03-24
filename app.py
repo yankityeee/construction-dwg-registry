@@ -314,6 +314,24 @@ if uploaded_files:
             pdf_files = os.listdir(input_dir)
             total_files = len(pdf_files)
 
+            # Pre-scan to count total pages across all files
+            status_text.text("Scanning files to calculate total pages...")
+            total_pages_all_files = 0
+            for filename in pdf_files:
+                pdf_path = os.path.join(input_dir, filename)
+                try:
+                    temp_doc = fitz.open(pdf_path)
+                    total_pages_all_files += len(temp_doc)
+                    temp_doc.close()
+                except:
+                    pass # Ignore errors here, catch them during real processing
+            
+            # Prevent division by zero just in case
+            if total_pages_all_files == 0:
+                total_pages_all_files = 1 
+                
+            processed_pages = 0 # Initialize our running counter
+
             for idx, filename in enumerate(pdf_files):
                 pdf_path = os.path.join(input_dir, filename)
                 base_name = os.path.splitext(filename)[0]
@@ -391,6 +409,9 @@ if uploaded_files:
 
                             batch_tensors, batch_page_nums = [], []
                             gc.collect()
+                        
+                        processed_pages += 1
+                        progress_bar.progress(processed_pages / total_pages_all_files)
 
                     fitz_doc.close()
                 except Exception as e:
@@ -402,7 +423,6 @@ if uploaded_files:
             live_header.empty()
             image_placeholder.empty()
             log_placeholder.empty()
-            status_text.text("Finalizing files...") # Briefly show this while pandas works
 
             if GENERATE_CSV_REPORT and all_results:
                 df = pd.DataFrame(all_results)
@@ -418,7 +438,7 @@ if uploaded_files:
                 st.dataframe(df)
             
             # --- FINAL UI CLEANUP ---
-            status_text.empty() # Remove the "Finalizing files..." text
+            status_text.empty()
             progress_bar.empty() # Remove the progress bar to make the final screen totally clean
             
             if not (SAVE_DRAWINGS_FOLDER or SAVE_NON_DRAWINGS_FOLDER or GENERATE_CSV_REPORT):
