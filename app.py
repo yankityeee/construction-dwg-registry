@@ -28,7 +28,7 @@ Task: Extract 'Drawing Title' and 'Drawing Number' from messy construction drawi
 
 RULES:
 - TITLE: Target the primary sheet subject. Combine multi-line fragments. Intelligently reconstruct mangled OCR into standard engineering terms.
-- EXCLUDE FROM TITLE: Overarching project/facility names, firm names, dates, and internal canvas labels.
+- EXCLUDE FROM TITLE: Overarching project names, company names, dates labels.
 - NUMBER: Target the unique alphanumeric sheet ID. Often located at the very end of the text block or next to distorted anchors.
 - EXCLUDE FROM NUMBER: Decoy numbers like referenced drawings, dates, scales, or detached revision codes.
 """
@@ -175,16 +175,25 @@ def extract_drawing_info(pdf_src: str, ocr: easyocr.Reader, client: genai.Client
         print(f"Gemini API Error: {e}")
         return {"drawing_title": "", "drawing_number": ""}
 
-def preprocess_pdf_page(fitz_page) -> torch.Tensor:
+def preprocess_pdf_page(fitz_page):
+    # Render at the strict 100 DPI your model expects
     pix = fitz_page.get_pixmap(dpi=100)
-    img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, 3))
+    
+    # Handle both RGB and RGBA (transparency) from PyMuPDF
+    img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, pix.n))
+    if pix.n == 4:
+        img_np = cv2.cvtColor(img_np, cv2.COLOR_RGBA2RGB)
+        
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     kernel = np.ones((2, 2), np.uint8)
     thickened_gray = cv2.erode(gray, kernel, iterations=1)
     final_img = cv2.resize(thickened_gray, (448, 448), interpolation=cv2.INTER_AREA)
     final_img_rgb = cv2.cvtColor(final_img, cv2.COLOR_GRAY2RGB)
+    
     tensor = TO_TENSOR(final_img_rgb)
-    return NORMALIZE(tensor)
+    
+    # Return BOTH the AI tensor and the 100 DPI base image
+    return NORMALIZE(tensor), img_np
 
 def classify_image_batch(batch_tensors: list, model: nn.Module, device: torch.device) -> tuple:
     batch_tensor = torch.stack(batch_tensors).to(device)
@@ -341,9 +350,27 @@ if uploaded_files:
 
                     for page_num in range(total_pages):
                         fitz_page = fitz_doc[page_num]
-                        tensor = preprocess_pdf_page(fitz_page)
+                        
+                        # --- RENDER ONCE, USE TWICE ---
+                        # Extract both the tensor for the AI and the numpy array for the UI
+                        tensor, display_img_np = preprocess_pdf_page(fitz_page)
+                        
                         batch_tensors.append(tensor)
                         batch_page_nums.append(page_num + 1)
+
+                        # --- LIVE IMAGE PREVIEW ---
+                        # Use numpy shape (height, width, channels) to calculate the fixed 500px height
+                        target_height = 500
+                        aspect_ratio = display_img_np.shape[1] / display_img_np.shape[0]
+                        calculated_width = int(target_height * aspect_ratio)
+                        
+                        # Streamlit reads numpy arrays natively, no conversion needed
+                        image_placeholder.image(
+                            display_img_np, 
+                            caption=f"Live View: {filename} (Page {page_num + 1})", 
+                            width=calculated_width
+                        )
+                        # --------------------------
 
                         if len(batch_tensors) == BATCH_SIZE or page_num == total_pages - 1:
                             pred_classes, conf_percents = classify_image_batch(batch_tensors, model, device)
