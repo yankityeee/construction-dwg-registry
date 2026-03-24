@@ -423,8 +423,8 @@ if uploaded_files:
                                         live_log_data.append({"Drawing Number": number, "Drawing Title": title})
                                         log_placeholder.dataframe(live_log_data, use_container_width=True)
                                 else:
-                                    row_data["Drawing Title"] = ""
-                                    row_data["Drawing Number"] = ""
+                                    row_data["Drawing Title"] = "N/A"
+                                    row_data["Drawing Number"] = "N/A"
 
                                 if INCLUDE_MODEL_OUTPUT:
                                     row_data["Prediction"] = pred_class
