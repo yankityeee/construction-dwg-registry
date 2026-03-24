@@ -175,14 +175,22 @@ def extract_drawing_info(pdf_src: str, ocr: easyocr.Reader, client: genai.Client
         print(f"Gemini API Error: {e}")
         return {"drawing_title": "", "drawing_number": ""}
 
-def preprocess_pdf_page(fitz_page) -> torch.Tensor:
-    pix = fitz_page.get_pixmap(dpi=100)
-    img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, 3))
+def preprocess_pdf_page(pix) -> torch.Tensor:
+    # Use the lightweight thumbnail we already generated for the UI
+    img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, pix.n))
+    
+    # Convert RGBA to RGB if the PDF had transparency
+    if pix.n == 4:
+        img_np = cv2.cvtColor(img_np, cv2.COLOR_RGBA2RGB)
+        
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     kernel = np.ones((2, 2), np.uint8)
     thickened_gray = cv2.erode(gray, kernel, iterations=1)
+    
+    # Resize the already-small image to exactly 448x448 for the AI
     final_img = cv2.resize(thickened_gray, (448, 448), interpolation=cv2.INTER_AREA)
     final_img_rgb = cv2.cvtColor(final_img, cv2.COLOR_GRAY2RGB)
+    
     tensor = TO_TENSOR(final_img_rgb)
     return NORMALIZE(tensor)
 
@@ -225,7 +233,7 @@ def create_zip_file(folder_path, output_filename="processed_drawings.zip"):
 # STREAMLIT USER INTERFACE
 # ==========================================
 st.set_page_config(page_title="Drawing Registry App", layout="wide")
-st.title("🏗️ Construction Drawing Registry App")
+st.title("🏗️ Construction Drawing Registry App", anchor=False)
 st.markdown("Upload your PDF drawings. The AI will classify them, fix their rotation, and generate drawing list.")
 
 # Initialize session state to handle clearing the file uploader
@@ -294,10 +302,9 @@ if uploaded_files:
             
             # --- UI DASHBOARD PLACEHOLDERS ---
             progress_bar = st.progress(0)
-            status_text = st.empty()
             live_header = st.empty() # Added placeholder for the header
             
-            live_header.markdown("### Live Processing View")
+            live_header.subheader("Processing View 📸", anchor=False)
             dash_col1, dash_col2 = st.columns([1, 1])
             with dash_col1:
                 image_placeholder = st.empty() 
@@ -315,7 +322,6 @@ if uploaded_files:
             total_files = len(pdf_files)
 
             # Pre-scan to count total pages across all files
-            status_text.text("Scanning files to calculate total pages...")
             total_pages_all_files = 0
             for filename in pdf_files:
                 pdf_path = os.path.join(input_dir, filename)
@@ -343,7 +349,25 @@ if uploaded_files:
 
                     for page_num in range(total_pages):
                         fitz_page = fitz_doc[page_num]
-                        tensor = preprocess_pdf_page(fitz_page)
+                        
+                        # 1. RENDER ONCE: Generate a lightweight UI thumbnail
+                        mat = fitz.Matrix(0.3, 0.3) 
+                        thumb_pix = fitz_page.get_pixmap(matrix=mat)
+                        
+                        # 2. SHOW LIVE VIEW
+                        target_height = 500
+                        aspect_ratio = thumb_pix.width / thumb_pix.height
+                        calculated_width = int(target_height * aspect_ratio)
+                        
+                        image_placeholder.image(
+                            thumb_pix.tobytes("png"), 
+                            caption=f"Live View: {filename} (Page {page_num + 1})", 
+                            width=calculated_width
+                        )
+
+                        # 3. REUSE FOR AI CLASSIFICATION
+                        # Pass the exact same thumbnail directly to the AI
+                        tensor = preprocess_pdf_page(thumb_pix)
                         batch_tensors.append(tensor)
                         batch_page_nums.append(page_num + 1)
 
@@ -353,24 +377,6 @@ if uploaded_files:
                             for i, (pred_class, conf_percent) in enumerate(zip(pred_classes, conf_percents)):
                                 current_page_num = batch_page_nums[i]
                                 target_folder_name = FOLDER_MAPPING[pred_class]
-                                degrees_to_fix = ROTATION_FIXES.get(pred_class, 0)
-                                
-                                # --- LIVE IMAGE PREVIEW (POST-ROTATION) ---
-                                display_page = fitz_doc[current_page_num - 1]
-                                
-                                mat = fitz.Matrix(0.3, 0.3).prerotate(degrees_to_fix)
-                                thumb_pix = display_page.get_pixmap(matrix=mat)
-                                
-                                target_height = 500
-                                aspect_ratio = thumb_pix.width / thumb_pix.height
-                                calculated_width = int(target_height * aspect_ratio)
-                                
-                                image_placeholder.image(
-                                    thumb_pix.tobytes("png"), 
-                                    caption=f"Live View: {filename} (Page {current_page_num}) - Rotated {degrees_to_fix}°", 
-                                    width=calculated_width
-                                )
-                                # ------------------------------------------
                                 
                                 out_pdf_path = None
                                 
@@ -385,7 +391,6 @@ if uploaded_files:
                                 }
 
                                 if out_pdf_path and target_folder_name == 'drawings':
-                                    status_text.text(f"Processing: {filename} (Page {current_page_num}/{total_pages})")
                                     dwg_info = extract_drawing_info(out_pdf_path, ocr, client)
                                     
                                     title = dwg_info.get("drawing_title", "")
@@ -408,6 +413,9 @@ if uploaded_files:
                                 all_results.append(row_data)
 
                             batch_tensors, batch_page_nums = [], []
+                            
+                            # Clean up the reused thumbnail from memory
+                            del thumb_pix 
                             gc.collect()
                         
                         processed_pages += 1
@@ -438,7 +446,6 @@ if uploaded_files:
                 st.dataframe(df)
             
             # --- FINAL UI CLEANUP ---
-            status_text.empty()
             progress_bar.empty() # Remove the progress bar to make the final screen totally clean
             
             if not (SAVE_DRAWINGS_FOLDER or SAVE_NON_DRAWINGS_FOLDER or GENERATE_CSV_REPORT):
