@@ -176,7 +176,7 @@ def extract_drawing_info(pdf_src: str, ocr: easyocr.Reader, client: genai.Client
         return {"drawing_title": "", "drawing_number": ""}
 
 def preprocess_pdf_page(fitz_page):
-    # Render at the strict 100 DPI your model expects
+    # Render at the strict 100 DPI the drawing classifier model expects
     pix = fitz_page.get_pixmap(dpi=100)
     
     # Handle both RGB and RGBA (transparency) from PyMuPDF
