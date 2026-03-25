@@ -94,10 +94,13 @@ def load_gemini_client():
 # ==========================================
 # PROCESSING FUNCTIONS
 # ==========================================
-def extract_drawing_info(page: fitz.Page, ocr: easyocr.Reader, client: genai.Client) -> dict:
+def extract_drawing_info(pdf_src: str, ocr: easyocr.Reader, client: genai.Client) -> dict:
     """
-    Extracts text directly from the in-memory page object. Bypasses disk I/O.
+    Extracts text using PyMuPDF to crop mathematical areas BEFORE rendering them to images.
+    This saves massive amounts of RAM compared to rendering the whole PDF first.
     """
+    doc = fitz.open(pdf_src)
+    page = doc[0]
     rect = page.rect
     w, h = rect.width, rect.height
     
@@ -133,24 +136,30 @@ def extract_drawing_info(page: fitz.Page, ocr: easyocr.Reader, client: genai.Cli
             ])
             
     raw_text = ""
-    zoom = 2.0 
+    zoom = 2.0 # Renders at roughly 144 DPI - balance between OCR quality and RAM
     mat = fitz.Matrix(zoom, zoom)
     
     for clip_rect in crop_rects:
+        # Render ONLY the specific cropped area to an image
         pix = page.get_pixmap(matrix=mat, clip=clip_rect)
         img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
         
+        # Convert RGBA to RGB if necessary for EasyOCR
         if pix.n == 4:
             img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
             
+        # EasyOCR returns a list of tuples: (bounding_box, text, confidence)
         results = ocr.readtext(img_array)
         text_lines = [res[1] for res in results]
         
         if text_lines:
             raw_text += " " + " ".join(text_lines)
             
+        # Aggressive garbage collection for RAM safety
         del pix, img_array, results
         gc.collect()
+
+    doc.close()
 
     if not raw_text.strip():
         return {"drawing_title": "", "drawing_number": ""}
@@ -196,8 +205,8 @@ def classify_image_batch(batch_tensors: list, model: nn.Module, device: torch.de
     conf_percents = [conf.item() * 100 for conf in confidences]
     return pred_classes, conf_percents
 
-def process_and_save_page(fitz_doc, page_index: int, output_dir: str, target_folder_name: str, base_name: str, current_page_num: int, total_pages: int):
-    # (No return type hint needed anymore)
+def process_and_save_page(fitz_doc, pred_class: str, output_dir: str, base_name: str, current_page_num: int, total_pages: int) -> str:
+    target_folder_name = FOLDER_MAPPING[pred_class]
     out_folder = os.path.join(output_dir, target_folder_name)
     os.makedirs(out_folder, exist_ok=True)
     
@@ -205,11 +214,17 @@ def process_and_save_page(fitz_doc, page_index: int, output_dir: str, target_fol
     out_pdf_path = os.path.join(out_folder, out_pdf_name)
 
     new_pdf = fitz.open()
-    # The fitz_doc already has the rotation applied in memory by the main loop
+    page_index = current_page_num - 1
     new_pdf.insert_pdf(fitz_doc, from_page=page_index, to_page=page_index)
+
+    degrees_to_fix = ROTATION_FIXES.get(pred_class, 0)
+    if degrees_to_fix != 0:
+        page = new_pdf[0]
+        page.set_rotation((page.rotation + degrees_to_fix) % 360)
 
     new_pdf.save(out_pdf_path, garbage=4, deflate=True)
     new_pdf.close()
+    return out_pdf_path
 
 def create_zip_file(folder_path, output_filename="processed_drawings.zip"):
     shutil.make_archive(output_filename.replace('.zip', ''), 'zip', folder_path)
@@ -362,19 +377,15 @@ if uploaded_files:
 
                             for i, (pred_class, conf_percent) in enumerate(zip(pred_classes, conf_percents)):
                                 current_page_num = batch_page_nums[i]
-                                page_index = current_page_num - 1
                                 target_folder_name = FOLDER_MAPPING[pred_class]
                                 degrees_to_fix = ROTATION_FIXES.get(pred_class, 0)
                                 
-                                # 1. Get the page and apply rotation IN-MEMORY instantly
-                                processing_page = fitz_doc[page_index]
-                                if degrees_to_fix != 0:
-                                    processing_page.set_rotation((processing_page.rotation + degrees_to_fix) % 360)
-                                
                                 # --- LIVE IMAGE PREVIEW ---
-                                # Because we rotated it above, the UI will now show it upright!
+                                display_page = fitz_doc[current_page_num - 1]
+                                
+                                # Standard scaling matrix, no rotation math applied
                                 mat = fitz.Matrix(0.3, 0.3) 
-                                thumb_pix = processing_page.get_pixmap(matrix=mat)
+                                thumb_pix = display_page.get_pixmap(matrix=mat)
                                 
                                 target_height = 500
                                 aspect_ratio = thumb_pix.width / thumb_pix.height
@@ -387,40 +398,11 @@ if uploaded_files:
                                 )
                                 # ------------------------------------------
                                 
-                                # 2. Extract OCR Data (Decoupled from file saving!)
-                                row_data = {
-                                    "Folder": target_folder_name,
-                                    "Filename": filename,
-                                    "Page": current_page_num
-                                }
-
-                                if target_folder_name == 'drawings':
-                                    # Pass the in-memory page directly to OCR
-                                    dwg_info = extract_drawing_info(processing_page, ocr, client)
-                                    
-                                    title = dwg_info.get("drawing_title", "")
-                                    number = dwg_info.get("drawing_number", "")
-                                    
-                                    row_data["Drawing Title"] = title
-                                    row_data["Drawing Number"] = number
-                                    
-                                    if title or number:
-                                        live_log_data.append({"Drawing Number": number, "Drawing Title": title})
-                                        log_placeholder.dataframe(live_log_data, use_container_width=True)
-                                else:
-                                    row_data["Drawing Title"] = "N/A"
-                                    row_data["Drawing Number"] = "N/A"
-
-                                if INCLUDE_MODEL_OUTPUT:
-                                    row_data["Prediction"] = pred_class
-                                    row_data["Confidence (%)"] = round(conf_percent, 2)
-
-                                all_results.append(row_data)
-
-                                # 3. Save the file ONLY if requested by the user
+                                out_pdf_path = None
+                                
                                 if (target_folder_name == 'drawings' and SAVE_DRAWINGS_FOLDER) or \
                                    (target_folder_name == 'non_drawings' and SAVE_NON_DRAWINGS_FOLDER):
-                                    process_and_save_page(fitz_doc, page_index, output_dir, target_folder_name, base_name, current_page_num, total_pages)
+                                    out_pdf_path = process_and_save_page(fitz_doc, pred_class, output_dir, base_name, current_page_num, total_pages)
 
                                 row_data = {
                                     "Folder": target_folder_name,
@@ -428,8 +410,8 @@ if uploaded_files:
                                     "Page": current_page_num
                                 }
 
-                                if ocr_target_path and target_folder_name == 'drawings':
-                                    dwg_info = extract_drawing_info(ocr_target_path, ocr, client)
+                                if out_pdf_path and target_folder_name == 'drawings':
+                                    dwg_info = extract_drawing_info(out_pdf_path, ocr, client)
                                     
                                     title = dwg_info.get("drawing_title", "")
                                     number = dwg_info.get("drawing_number", "")
