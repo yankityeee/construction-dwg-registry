@@ -2,6 +2,7 @@ numpy
 pandas
 torch
 torchvision
+transformers
 pymupdf
 opencv-python-headless
 easyocr
