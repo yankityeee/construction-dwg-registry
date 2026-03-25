@@ -196,7 +196,7 @@ def preprocess_pdf_page(fitz_page):
     
     tensor = TO_TENSOR(final_img_rgb)
     
-    # Return BOTH the AI tensor and the 448x448 processed AI Vision image
+    # Return BOTH the AI tensor and the 448x448 processed AI Vision for UI
     return NORMALIZE(tensor), final_img_rgb
 
 def classify_image_batch(batch_tensors: list, model: nn.Module, device: torch.device) -> tuple:
@@ -250,9 +250,9 @@ with st.spinner("Loading AI Models... (This takes a moment on startup)"):
     model, device = load_resnet_model()
     ocr = load_ocr()
     client = load_gemini_client()
-    tts_pipe = load_tts_pipeline() # Added TTS initialization
+    tts_pipe = load_tts_pipeline()
 
-# 1. Original Uploader Layout
+# Original Uploader Layout
 uploaded_files = st.file_uploader(
     "",
     type="pdf", 
@@ -285,12 +285,12 @@ if uploaded_files:
         if GENERATE_CSV_REPORT:
             INCLUDE_MODEL_OUTPUT = st.toggle("Include Model Predictions & Confidence in CSV", value=False)
 
-    # 1. Evaluate the State
+    # Evaluate the State
     no_outputs_selected = not (SAVE_DRAWINGS_FOLDER or SAVE_NON_DRAWINGS_FOLDER or GENERATE_CSV_REPORT)
 
     st.write("---") # Visual divider before actions
     
-    # 2. Provide Immediate Feedback
+    # Provide Immediate Feedback
     if no_outputs_selected:
         st.warning("⚠️ Please select at least one output preference to begin processing.")
 
@@ -331,7 +331,7 @@ if uploaded_files:
             with dash_col2:
                 log_placeholder = st.empty()
 
-            # 3. Setup Independent Counters
+            # For audio (page counting)
             total_drawings_count = 0
             total_non_drawings_count = 0
 
@@ -354,7 +354,7 @@ if uploaded_files:
                     total_pages_all_files += len(temp_doc)
                     temp_doc.close()
                 except:
-                    pass # Ignore errors here, catch them during real processing
+                    pass # catch error during real processing
             
             # Prevent division by zero just in case
             if total_pages_all_files == 0:
@@ -374,25 +374,20 @@ if uploaded_files:
                     for page_num in range(total_pages):
                         fitz_page = fitz_doc[page_num]
                         
-                        # --- RENDER ONCE, USE TWICE ---
-                        # Extract both the tensor for the AI and the numpy array for the UI
+                        # Extract both the tensor for the AI and the numpy array for the UI thumbnail
                         tensor, display_img_np = preprocess_pdf_page(fitz_page)
                         
                         batch_tensors.append(tensor)
                         batch_page_nums.append(page_num + 1)
 
-                        # --- LIVE IMAGE PREVIEW ---
-                        # Streamlit reads numpy arrays natively, no conversion needed.
-                        # Using container width prevents horizontal layout shifts and flickering.
+                        # For Live AI Processing View
                         image_placeholder.image(
                             display_img_np, 
                             caption=f"{filename} (Page {page_num + 1})", 
                             width=224
                         )
                         
-                        # Aggressively clear the 448x448 image array from RAM immediately after rendering
                         del display_img_np
-                        # --------------------------
 
                         if len(batch_tensors) == BATCH_SIZE or page_num == total_pages - 1:
                             pred_classes, conf_percents = classify_image_batch(batch_tensors, model, device)
@@ -402,13 +397,13 @@ if uploaded_files:
                                 target_folder_name = FOLDER_MAPPING[pred_class]
                                 degrees_to_fix = ROTATION_FIXES.get(pred_class, 0)
 
-                                # 4. Increment Counters During Processing
+                                # For audio (page counting)
                                 if target_folder_name == 'drawings':
                                     total_drawings_count += 1
                                 else:
                                     total_non_drawings_count += 1
                                 
-                                # 1. Rotate First: Apply to fitz_doc in-memory
+                                # Rotate First: Apply to fitz_doc in-memory
                                 current_page = fitz_doc[current_page_num - 1]
                                 if degrees_to_fix != 0:
                                     current_page.set_rotation((current_page.rotation + degrees_to_fix) % 360)
@@ -419,7 +414,7 @@ if uploaded_files:
                                     "Page": current_page_num
                                 }
 
-                                # 3. Conditionally Run OCR and Data Collection
+                                # Conditionally Run OCR and Data Collection
                                 if GENERATE_CSV_REPORT:
                                     row_data = {
                                         "Folder": target_folder_name,
@@ -449,13 +444,13 @@ if uploaded_files:
 
                                     all_results.append(row_data)
 
-                                # 4. Conditionally Save: Fire and forget
+                                # Conditionally Save: Fire and forget
                                 if (target_folder_name == 'drawings' and SAVE_DRAWINGS_FOLDER) or \
                                    (target_folder_name == 'non_drawings' and SAVE_NON_DRAWINGS_FOLDER):
                                     process_and_save_page(fitz_doc, pred_class, output_dir, base_name, current_page_num, total_pages)
 
                             batch_tensors, batch_page_nums = [], []
-                            gc.collect() # Safe to run, no broken thumbnail references to worry about
+                            gc.collect()
                         
                         processed_pages += 1
                         progress_bar.progress(processed_pages / total_pages_all_files)
@@ -485,24 +480,34 @@ if uploaded_files:
                 st.dataframe(df)
             
             # --- FINAL UI CLEANUP ---
-            progress_bar.empty() # Remove the progress bar to make the final screen totally clean
+            progress_bar.empty()
             
             st.success("✅ Processing Complete!")
 
-            # 5. Generate and Autoplay Audio
+            # Generate and Autoplay Audio
             drawings_word = num2words(total_drawings_count)
             non_drawings_word = num2words(total_non_drawings_count)
-            summary_text = f"process completed... found {drawings_word} drawings and {non_drawings_word} non drawings."
+            
+            part1_text = "process completed"
+            part2_text = f"found {drawings_word} drawings and {non_drawings_word} non drawings"
             
             with st.spinner("Generating audio summary..."):
-                audio_result = tts_pipe(summary_text)
-                st.audio(audio_result["audio"], sample_rate=audio_result["sampling_rate"], autoplay=True)
+                audio_part1 = tts_pipe(part1_text)
+                audio_part2 = tts_pipe(part2_text)
+                
+                sample_rate = audio_part1["sampling_rate"]
+                silence_length = int(sample_rate * 0.5)
+                silence_array = np.zeros(silence_length, dtype=np.float32)
+                
+                combined_audio = np.concatenate((audio_part1["audio"], silence_array, audio_part2["audio"]))
+                
+                st.audio(combined_audio, sample_rate=sample_rate, autoplay=True)
             
-            # Step 1: Save the zip strictly inside the temporary directory
+            # For zipping files
             zip_target_path = os.path.join(temp_dir, "processed_drawings")
             zip_path = create_zip_file(output_dir, zip_target_path)
             
-            # Step 2: Read the file into memory to release the disk lock before temp_dir closes
+            # Read the file into memory to release the disk lock before temp_dir closes
             with open(zip_path, "rb") as fp:
                 zip_data = fp.read()
                 
