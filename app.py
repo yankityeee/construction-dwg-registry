@@ -17,6 +17,10 @@ from torchvision import transforms, models
 from google import genai
 from google.genai import types
 
+# 1. New Imports Added
+from transformers import pipeline
+from num2words import num2words
+
 # ==========================================
 # CONFIGURATION & MAPPINGS
 # ==========================================
@@ -90,6 +94,11 @@ def load_ocr():
 @st.cache_resource
 def load_gemini_client():
     return genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+# 2. Initialize the TTS Pipeline
+@st.cache_resource
+def load_tts_pipeline():
+    return pipeline("text-to-speech", model="facebook/mms-tts-eng")
 
 # ==========================================
 # PROCESSING FUNCTIONS
@@ -241,6 +250,7 @@ with st.spinner("Loading AI Models... (This takes a moment on startup)"):
     model, device = load_resnet_model()
     ocr = load_ocr()
     client = load_gemini_client()
+    tts_pipe = load_tts_pipeline() # Added TTS initialization
 
 # 1. Original Uploader Layout
 uploaded_files = st.file_uploader(
@@ -321,6 +331,9 @@ if uploaded_files:
             with dash_col2:
                 log_placeholder = st.empty()
 
+            # 3. Setup Independent Counters
+            total_drawings_count = 0
+            total_non_drawings_count = 0
 
             # --- START PROCESSING FILES ---
             # Save only the unique files
@@ -388,13 +401,17 @@ if uploaded_files:
                                 current_page_num = batch_page_nums[i]
                                 target_folder_name = FOLDER_MAPPING[pred_class]
                                 degrees_to_fix = ROTATION_FIXES.get(pred_class, 0)
+
+                                # 4. Increment Counters During Processing
+                                if target_folder_name == 'drawings':
+                                    total_drawings_count += 1
+                                else:
+                                    total_non_drawings_count += 1
                                 
                                 # 1. Rotate First: Apply to fitz_doc in-memory
                                 current_page = fitz_doc[current_page_num - 1]
                                 if degrees_to_fix != 0:
                                     current_page.set_rotation((current_page.rotation + degrees_to_fix) % 360)
-
-                                # (The redundant step 2 UI Preview block has been completely removed)
 
                                 row_data = {
                                     "Folder": target_folder_name,
@@ -471,6 +488,15 @@ if uploaded_files:
             progress_bar.empty() # Remove the progress bar to make the final screen totally clean
             
             st.success("✅ Processing Complete!")
+
+            # 5. Generate and Autoplay Audio
+            drawings_word = num2words(total_drawings_count)
+            non_drawings_word = num2words(total_non_drawings_count)
+            summary_text = f"processing complete. found {drawings_word} drawings and {non_drawings_word} non drawings."
+            
+            with st.spinner("Generating audio summary..."):
+                audio_result = tts_pipe(summary_text)
+                st.audio(audio_result["audio"][0], sample_rate=audio_result["sampling_rate"], autoplay=True)
             
             # Step 1: Save the zip strictly inside the temporary directory
             zip_target_path = os.path.join(temp_dir, "processed_drawings")
