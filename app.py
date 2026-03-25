@@ -217,9 +217,14 @@ def process_and_save_page(fitz_doc, pred_class: str, output_dir: str, base_name:
     new_pdf.save(out_pdf_path, garbage=4, deflate=True)
     new_pdf.close()
 
-def create_zip_file(folder_path, output_filename="processed_drawings.zip"):
-    shutil.make_archive(output_filename.replace('.zip', ''), 'zip', folder_path)
-    return output_filename
+def create_zip_file(folder_path, output_path):
+    """
+    Creates a zip archive from a directory.
+    output_path should be the absolute base path (without .zip extension).
+    """
+    # shutil.make_archive automatically appends '.zip' and returns the full path
+    final_zip_path = shutil.make_archive(output_path, 'zip', folder_path)
+    return final_zip_path
 
 # ==========================================
 # STREAMLIT USER INTERFACE
@@ -270,13 +275,26 @@ if uploaded_files:
         if GENERATE_CSV_REPORT:
             INCLUDE_MODEL_OUTPUT = st.toggle("Include Model Predictions & Confidence in CSV", value=False)
 
+    # 1. Evaluate the State
+    no_outputs_selected = not (SAVE_DRAWINGS_FOLDER or SAVE_NON_DRAWINGS_FOLDER or GENERATE_CSV_REPORT)
+
     st.write("---") # Visual divider before actions
+    
+    # 2. Provide Immediate Feedback
+    if no_outputs_selected:
+        st.warning("⚠️ Please select at least one output preference to begin processing.")
 
     # Buttons Layout and Primary Styling
     col1, col2, col3 = st.columns([2, 2, 4]) 
     
     with col1:
-        start_processing = st.button("▶️ Start Processing", type="primary", use_container_width=True)
+        # 3. Disable the Action Button
+        start_processing = st.button(
+            "▶️ Start Processing", 
+            type="primary", 
+            use_container_width=True,
+            disabled=no_outputs_selected
+        )
     with col2:
         if st.button("🗑️ Clear Uploads", use_container_width=True):
             st.session_state.uploader_key += 1
@@ -301,9 +319,10 @@ if uploaded_files:
             with dash_col1:
                 image_placeholder = st.empty() 
             with dash_col2:
-                log_placeholder = st.empty() 
-            # ---------------------------------
+                log_placeholder = st.empty()
 
+
+            # --- START PROCESSING FILES ---
             # Save only the unique files
             for file in files_to_process:
                 file_path = os.path.join(input_dir, file.name)
@@ -458,17 +477,20 @@ if uploaded_files:
             # --- FINAL UI CLEANUP ---
             progress_bar.empty() # Remove the progress bar to make the final screen totally clean
             
-            if not (SAVE_DRAWINGS_FOLDER or SAVE_NON_DRAWINGS_FOLDER or GENERATE_CSV_REPORT):
-                st.warning("⚠️ No output preferences were selected, so no files were saved or generated.")
-            else:
-                st.success("✅ Processing Complete!")
-                zip_path = create_zip_file(output_dir, "processed_drawings.zip")
+            st.success("✅ Processing Complete!")
+            
+            # Step 1: Save the zip strictly inside the temporary directory
+            zip_target_path = os.path.join(temp_dir, "processed_drawings")
+            zip_path = create_zip_file(output_dir, zip_target_path)
+            
+            # Step 2: Read the file into memory to release the disk lock before temp_dir closes
+            with open(zip_path, "rb") as fp:
+                zip_data = fp.read()
                 
-                with open(zip_path, "rb") as fp:
-                    st.download_button(
-                        label="📥 Download Zipped Registry",
-                        data=fp,
-                        file_name="processed_drawings.zip",
-                        mime="application/zip",
-                        type="primary"
-                    )
+            st.download_button(
+                label="📥 Download Zipped Registry",
+                data=zip_data,
+                file_name="processed_drawings.zip",
+                mime="application/zip",
+                type="primary"
+            )
