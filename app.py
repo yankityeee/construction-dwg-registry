@@ -171,8 +171,8 @@ def extract_drawing_info(page: fitz.Page, ocr: easyocr.Reader, client: genai.Cli
         return {"drawing_title": "", "drawing_number": ""}
 
 def preprocess_pdf_page(fitz_page):
-    # Render at the strict 100 DPI the drawing classifier model expects
-    pix = fitz_page.get_pixmap(dpi=100)
+    # Render at the strict 150 DPI the drawing classifier model expects
+    pix = fitz_page.get_pixmap(dpi=150)
     
     # Handle both RGB and RGBA (transparency) from PyMuPDF
     img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, pix.n))
@@ -187,8 +187,8 @@ def preprocess_pdf_page(fitz_page):
     
     tensor = TO_TENSOR(final_img_rgb)
     
-    # Return BOTH the AI tensor and the 100 DPI base image
-    return NORMALIZE(tensor), img_np
+    # Return BOTH the AI tensor and the 448x448 processed AI Vision image
+    return NORMALIZE(tensor), final_img_rgb
 
 def classify_image_batch(batch_tensors: list, model: nn.Module, device: torch.device) -> tuple:
     batch_tensor = torch.stack(batch_tensors).to(device)
@@ -314,7 +314,7 @@ if uploaded_files:
             progress_bar = st.progress(0)
             live_header = st.empty() # Added placeholder for the header
             
-            live_header.subheader("Processing View 📸", anchor=False)
+            live_header.subheader("AI Processing Vision 📸", anchor=False)
             dash_col1, dash_col2 = st.columns([1, 1])
             with dash_col1:
                 image_placeholder = st.empty() 
@@ -373,9 +373,12 @@ if uploaded_files:
                         # Using container width prevents horizontal layout shifts and flickering.
                         image_placeholder.image(
                             display_img_np, 
-                            caption=f"Live View: {filename} (Page {page_num + 1})", 
+                            caption=f"{filename} (Page {page_num + 1})", 
                             use_container_width=True
                         )
+                        
+                        # Aggressively clear the 448x448 image array from RAM immediately after rendering
+                        del display_img_np
                         # --------------------------
 
                         if len(batch_tensors) == BATCH_SIZE or page_num == total_pages - 1:
