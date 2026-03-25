@@ -374,7 +374,7 @@ if uploaded_files:
                         image_placeholder.image(
                             display_img_np, 
                             caption=f"{filename} (Page {page_num + 1})", 
-                            use_container_width=True
+                            width=224
                         )
                         
                         # Aggressively clear the 448x448 image array from RAM immediately after rendering
