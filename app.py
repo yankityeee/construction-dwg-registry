@@ -402,28 +402,35 @@ if uploaded_files:
                                     "Page": current_page_num
                                 }
 
-                                # 3. Run OCR In-Memory
-                                if target_folder_name == 'drawings':
-                                    dwg_info = extract_drawing_info(current_page, ocr, client)
-                                    
-                                    title = dwg_info.get("drawing_title", "")
-                                    number = dwg_info.get("drawing_number", "")
-                                    
-                                    row_data["Drawing Title"] = title
-                                    row_data["Drawing Number"] = number
-                                    
-                                    if title or number:
-                                        live_log_data.append({"Drawing Number": number, "Drawing Title": title})
-                                        log_placeholder.dataframe(live_log_data, use_container_width=True)
-                                else:
-                                    row_data["Drawing Title"] = "N/A"
-                                    row_data["Drawing Number"] = "N/A"
+                                # 3. Conditionally Run OCR and Data Collection
+                                if GENERATE_CSV_REPORT:
+                                    row_data = {
+                                        "Folder": target_folder_name,
+                                        "Filename": filename,
+                                        "Page": current_page_num
+                                    }
 
-                                if INCLUDE_MODEL_OUTPUT:
-                                    row_data["Prediction"] = pred_class
-                                    row_data["Confidence (%)"] = round(conf_percent, 2)
+                                    if target_folder_name == 'drawings':
+                                        dwg_info = extract_drawing_info(current_page, ocr, client)
+                                        
+                                        title = dwg_info.get("drawing_title", "")
+                                        number = dwg_info.get("drawing_number", "")
+                                        
+                                        row_data["Drawing Title"] = title
+                                        row_data["Drawing Number"] = number
+                                        
+                                        if title or number:
+                                            live_log_data.append({"Drawing Number": number, "Drawing Title": title})
+                                            log_placeholder.dataframe(live_log_data, use_container_width=True)
+                                    else:
+                                        row_data["Drawing Title"] = "N/A"
+                                        row_data["Drawing Number"] = "N/A"
 
-                                all_results.append(row_data)
+                                    if INCLUDE_MODEL_OUTPUT:
+                                        row_data["Prediction"] = pred_class
+                                        row_data["Confidence (%)"] = round(conf_percent, 2)
+
+                                    all_results.append(row_data)
 
                                 # 4. Conditionally Save: Fire and forget
                                 if (target_folder_name == 'drawings' and SAVE_DRAWINGS_FOLDER) or \
