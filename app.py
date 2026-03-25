@@ -496,7 +496,7 @@ if uploaded_files:
             
             with st.spinner("Generating audio summary..."):
                 audio_result = tts_pipe(summary_text)
-                st.audio(audio_result["audio"][0], sample_rate=audio_result["sampling_rate"], autoplay=True)
+                st.audio(audio_result["audio"], sample_rate=audio_result["sampling_rate"], autoplay=True)
             
             # Step 1: Save the zip strictly inside the temporary directory
             zip_target_path = os.path.join(temp_dir, "processed_drawings")
