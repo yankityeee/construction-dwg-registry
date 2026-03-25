@@ -369,16 +369,12 @@ if uploaded_files:
                         batch_page_nums.append(page_num + 1)
 
                         # --- LIVE IMAGE PREVIEW ---
-                        # Use numpy shape (height, width, channels) to calculate the fixed 500px height
-                        target_height = 500
-                        aspect_ratio = display_img_np.shape[1] / display_img_np.shape[0]
-                        calculated_width = int(target_height * aspect_ratio)
-                        
-                        # Streamlit reads numpy arrays natively, no conversion needed
+                        # Streamlit reads numpy arrays natively, no conversion needed.
+                        # Using container width prevents horizontal layout shifts and flickering.
                         image_placeholder.image(
                             display_img_np, 
                             caption=f"Live View: {filename} (Page {page_num + 1})", 
-                            width=calculated_width
+                            use_container_width=True
                         )
                         # --------------------------
 
@@ -395,20 +391,7 @@ if uploaded_files:
                                 if degrees_to_fix != 0:
                                     current_page.set_rotation((current_page.rotation + degrees_to_fix) % 360)
 
-                                # 2. Update UI Preview: Generates thumbnail of the newly rotated page
-                                mat = fitz.Matrix(0.3, 0.3) 
-                                thumb_pix = current_page.get_pixmap(matrix=mat)
-                                
-                                target_height = 500
-                                aspect_ratio = thumb_pix.width / thumb_pix.height
-                                calculated_width = int(target_height * aspect_ratio)
-                                
-                                image_placeholder.image(
-                                    thumb_pix.tobytes("png"), 
-                                    caption=f"{filename} (Page {current_page_num})", 
-                                    width=calculated_width
-                                )
-                                # ------------------------------------------
+                                # (The redundant step 2 UI Preview block has been completely removed)
 
                                 row_data = {
                                     "Folder": target_folder_name,
@@ -445,7 +428,7 @@ if uploaded_files:
                                     process_and_save_page(fitz_doc, pred_class, output_dir, base_name, current_page_num, total_pages)
 
                             batch_tensors, batch_page_nums = [], []
-                            gc.collect()
+                            gc.collect() # Safe to run, no broken thumbnail references to worry about
                         
                         processed_pages += 1
                         progress_bar.progress(processed_pages / total_pages_all_files)
