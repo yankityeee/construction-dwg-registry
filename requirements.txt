@@ -8,3 +8,4 @@ opencv-python-headless
 easyocr
 google-genai
 pydantic
+num2words
