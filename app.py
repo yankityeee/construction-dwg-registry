@@ -94,13 +94,10 @@ def load_gemini_client():
 # ==========================================
 # PROCESSING FUNCTIONS
 # ==========================================
-def extract_drawing_info(pdf_src: str, ocr: easyocr.Reader, client: genai.Client) -> dict:
+def extract_drawing_info(page: fitz.Page, ocr: easyocr.Reader, client: genai.Client) -> dict:
     """
-    Extracts text using PyMuPDF to crop mathematical areas BEFORE rendering them to images.
-    This saves massive amounts of RAM compared to rendering the whole PDF first.
+    Extracts text using an in-memory PyMuPDF page object to crop mathematical areas BEFORE rendering them to images.
     """
-    doc = fitz.open(pdf_src)
-    page = doc[0]
     rect = page.rect
     w, h = rect.width, rect.height
     
@@ -159,8 +156,6 @@ def extract_drawing_info(pdf_src: str, ocr: easyocr.Reader, client: genai.Client
         del pix, img_array, results
         gc.collect()
 
-    doc.close()
-
     if not raw_text.strip():
         return {"drawing_title": "", "drawing_number": ""}
 
@@ -205,7 +200,8 @@ def classify_image_batch(batch_tensors: list, model: nn.Module, device: torch.de
     conf_percents = [conf.item() * 100 for conf in confidences]
     return pred_classes, conf_percents
 
-def process_and_save_page(fitz_doc, pred_class: str, output_dir: str, base_name: str, current_page_num: int, total_pages: int) -> str:
+def process_and_save_page(fitz_doc, pred_class: str, output_dir: str, base_name: str, current_page_num: int, total_pages: int):
+    """Fire-and-forget saving of the PDF page."""
     target_folder_name = FOLDER_MAPPING[pred_class]
     out_folder = os.path.join(output_dir, target_folder_name)
     os.makedirs(out_folder, exist_ok=True)
@@ -217,14 +213,9 @@ def process_and_save_page(fitz_doc, pred_class: str, output_dir: str, base_name:
     page_index = current_page_num - 1
     new_pdf.insert_pdf(fitz_doc, from_page=page_index, to_page=page_index)
 
-    degrees_to_fix = ROTATION_FIXES.get(pred_class, 0)
-    if degrees_to_fix != 0:
-        page = new_pdf[0]
-        page.set_rotation((page.rotation + degrees_to_fix) % 360)
-
+    # Rotation is already handled on the fitz_doc in memory in the main loop
     new_pdf.save(out_pdf_path, garbage=4, deflate=True)
     new_pdf.close()
-    return out_pdf_path
 
 def create_zip_file(folder_path, output_filename="processed_drawings.zip"):
     shutil.make_archive(output_filename.replace('.zip', ''), 'zip', folder_path)
@@ -380,12 +371,14 @@ if uploaded_files:
                                 target_folder_name = FOLDER_MAPPING[pred_class]
                                 degrees_to_fix = ROTATION_FIXES.get(pred_class, 0)
                                 
-                                # --- LIVE IMAGE PREVIEW ---
-                                display_page = fitz_doc[current_page_num - 1]
-                                
-                                # Standard scaling matrix, no rotation math applied
+                                # 1. Rotate First: Apply to fitz_doc in-memory
+                                current_page = fitz_doc[current_page_num - 1]
+                                if degrees_to_fix != 0:
+                                    current_page.set_rotation((current_page.rotation + degrees_to_fix) % 360)
+
+                                # 2. Update UI Preview: Generates thumbnail of the newly rotated page
                                 mat = fitz.Matrix(0.3, 0.3) 
-                                thumb_pix = display_page.get_pixmap(matrix=mat)
+                                thumb_pix = current_page.get_pixmap(matrix=mat)
                                 
                                 target_height = 500
                                 aspect_ratio = thumb_pix.width / thumb_pix.height
@@ -397,12 +390,6 @@ if uploaded_files:
                                     width=calculated_width
                                 )
                                 # ------------------------------------------
-                                
-                                out_pdf_path = None
-                                
-                                if (target_folder_name == 'drawings' and SAVE_DRAWINGS_FOLDER) or \
-                                   (target_folder_name == 'non_drawings' and SAVE_NON_DRAWINGS_FOLDER):
-                                    out_pdf_path = process_and_save_page(fitz_doc, pred_class, output_dir, base_name, current_page_num, total_pages)
 
                                 row_data = {
                                     "Folder": target_folder_name,
@@ -410,8 +397,9 @@ if uploaded_files:
                                     "Page": current_page_num
                                 }
 
-                                if out_pdf_path and target_folder_name == 'drawings':
-                                    dwg_info = extract_drawing_info(out_pdf_path, ocr, client)
+                                # 3. Run OCR In-Memory
+                                if target_folder_name == 'drawings':
+                                    dwg_info = extract_drawing_info(current_page, ocr, client)
                                     
                                     title = dwg_info.get("drawing_title", "")
                                     number = dwg_info.get("drawing_number", "")
@@ -431,6 +419,11 @@ if uploaded_files:
                                     row_data["Confidence (%)"] = round(conf_percent, 2)
 
                                 all_results.append(row_data)
+
+                                # 4. Conditionally Save: Fire and forget
+                                if (target_folder_name == 'drawings' and SAVE_DRAWINGS_FOLDER) or \
+                                   (target_folder_name == 'non_drawings' and SAVE_NON_DRAWINGS_FOLDER):
+                                    process_and_save_page(fitz_doc, pred_class, output_dir, base_name, current_page_num, total_pages)
 
                             batch_tensors, batch_page_nums = [], []
                             gc.collect()
