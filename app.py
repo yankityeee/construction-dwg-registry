@@ -492,7 +492,7 @@ if uploaded_files:
             # 5. Generate and Autoplay Audio
             drawings_word = num2words(total_drawings_count)
             non_drawings_word = num2words(total_non_drawings_count)
-            summary_text = f"processing complete. found {drawings_word} drawings and {non_drawings_word} non drawings."
+            summary_text = f"process completed... found {drawings_word} drawings and {non_drawings_word} non drawings."
             
             with st.spinner("Generating audio summary..."):
                 audio_result = tts_pipe(summary_text)
