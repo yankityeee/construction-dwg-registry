@@ -495,13 +495,16 @@ if uploaded_files:
                 audio_part1 = tts_pipe(part1_text)
                 audio_part2 = tts_pipe(part2_text)
                 
+                part1_data = audio_part1["audio"].flatten().astype(np.float32)
+                part2_data = audio_part2["audio"].flatten().astype(np.float32)
+                
                 sample_rate = audio_part1["sampling_rate"]
                 silence_length = int(sample_rate * 0.5)
                 silence_array = np.zeros(silence_length, dtype=np.float32)
                 
-                combined_audio = np.concatenate((audio_part1["audio"], silence_array, audio_part2["audio"]))
+                combined_audio = np.concatenate((part1_data, silence_array, part2_data))
                 
-                st.audio(combined_audio, sample_rate=sample_rate, autoplay=True)
+                st.audio(combined_audio, sample_rate=sample_rate, format="audio/wav", autoplay=True)
             
             # For zipping files
             zip_target_path = os.path.join(temp_dir, "processed_drawings")
