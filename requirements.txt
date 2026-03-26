@@ -1,7 +1,9 @@
+streamlit
 numpy
 pandas
 torch
 torchvision
+accelerate
 transformers>=4.33.0,<5.0.0
 pymupdf
 opencv-python-headless
@@ -9,3 +11,4 @@ easyocr
 google-genai
 pydantic
 num2words
+scipy
