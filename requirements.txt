@@ -2,7 +2,7 @@ numpy
 pandas
 torch
 torchvision
-transformers
+transformers>=4.33.0,<5.0.0
 pymupdf
 opencv-python-headless
 easyocr
