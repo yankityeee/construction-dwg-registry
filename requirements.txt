@@ -11,4 +11,3 @@ easyocr
 google-genai
 pydantic
 num2words
-scipy
