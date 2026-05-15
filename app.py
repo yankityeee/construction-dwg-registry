@@ -484,27 +484,27 @@ if uploaded_files:
             
             st.success("✅ Processing Complete!")
 
-            # Generate and Autoplay Audio
-            drawings_word = num2words(total_drawings_count)
-            non_drawings_word = num2words(total_non_drawings_count)
+            # # Generate and Autoplay Audio
+            # drawings_word = num2words(total_drawings_count)
+            # non_drawings_word = num2words(total_non_drawings_count)
             
-            part1_text = "process completed"
-            part2_text = f"found {drawings_word} drawings and {non_drawings_word} non drawings"
+            # part1_text = "process completed"
+            # part2_text = f"found {drawings_word} drawings and {non_drawings_word} non drawings"
             
-            with st.spinner("Generating audio summary..."):
-                audio_part1 = tts_pipe(part1_text)
-                audio_part2 = tts_pipe(part2_text)
+            # with st.spinner("Generating audio summary..."):
+            #     audio_part1 = tts_pipe(part1_text)
+            #     audio_part2 = tts_pipe(part2_text)
                 
-                part1_data = audio_part1["audio"].flatten().astype(np.float32)
-                part2_data = audio_part2["audio"].flatten().astype(np.float32)
+            #     part1_data = audio_part1["audio"].flatten().astype(np.float32)
+            #     part2_data = audio_part2["audio"].flatten().astype(np.float32)
                 
-                sample_rate = audio_part1["sampling_rate"]
-                silence_length = int(sample_rate * 0.5)
-                silence_array = np.zeros(silence_length, dtype=np.float32)
+            #     sample_rate = audio_part1["sampling_rate"]
+            #     silence_length = int(sample_rate * 0.5)
+            #     silence_array = np.zeros(silence_length, dtype=np.float32)
                 
-                combined_audio = np.concatenate((part1_data, silence_array, part2_data))
+            #     combined_audio = np.concatenate((part1_data, silence_array, part2_data))
                 
-                st.audio(combined_audio, sample_rate=sample_rate, format="audio/wav", autoplay=True)
+            #     st.audio(combined_audio, sample_rate=sample_rate, format="audio/wav", autoplay=True)
             
             # For zipping files
             zip_target_path = os.path.join(temp_dir, "processed_drawings")
